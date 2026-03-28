@@ -1,0 +1,1822 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © velupandianravichandran
+// Algorithm: Quant Pivot Engine
+// Description: Full-featured pivot engine supporting Fibonacci, Camarilla, Traditional, PivotBoss, and VPR pivot types.
+//              Includes Weekly/Monthly CPR, Dynamic Historical Pivots, Point of Control (POC), Money Zones (VAH/VAL),
+//              VWAP with bands, SuperTrend, Hull MA Trend, Bollinger Bands/Donchian/Envelope channels,
+//              Volume-based candle coloring, extra Fibonacci pivot levels, and Weekly Camarilla levels.
+//              Tomorrow CPR lines for next session planning are also supported.
+
+//@version=5
+indicator('Quant Pivot Engine', overlay=true, max_lines_count=500, max_bars_back=4900, max_boxes_count=500, format=format.price, precision=2)
+
+//-------------------------------------------------------------------------------------------
+// Password Check
+password = input.string(title="Please Enter Password", defval="impetus")
+var passlock = false
+if str.tostring(password) == "impetus"
+    passlock := true
+
+
+// INTERMEDIATE STEP : CPR : Cont'd in Line 1943
+showWeeklyCam = input(false   , "Show Weekly Camarilla Levels?", inline="Show Cam Levels?",group="WEEKLY / MONTHLY CPR")
+weeklyCamOffset = input.int(title='Camarilla Label offset', defval=-90, step=1, group="WEEKLY / MONTHLY CPR")
+
+show_CPR_tomorrow = input(false   , "Show Weekly CPR Levels?", inline="Show Tomorrow CPR Levels?",group="WEEKLY / MONTHLY CPR")
+show_cpr_monthly = input(false   , "Show Monthly CPR Levels?", inline="Show Tomorrow CPR Levels?",group="WEEKLY / MONTHLY CPR")
+cprLabelOffset = input.int(title='CPR Label offset', defval=90, step=1,group="WEEKLY / MONTHLY CPR")
+
+// Calculate Tomorrow's CPR
+// Get High, Low and Close
+
+th_d = request.security(syminfo.tickerid, 'M', high[1], barmerge.gaps_off, barmerge.lookahead_on)
+tl_d = request.security(syminfo.tickerid, 'M', low[1], barmerge.gaps_off, barmerge.lookahead_on)
+tc_d = request.security(syminfo.tickerid, 'M', close[1], barmerge.gaps_off, barmerge.lookahead_on)
+
+th_d_w = request.security(syminfo.tickerid, 'W', high[1], barmerge.gaps_off, barmerge.lookahead_on)
+tl_d_w = request.security(syminfo.tickerid, 'W', low[1], barmerge.gaps_off, barmerge.lookahead_on)
+tc_d_w = request.security(syminfo.tickerid, 'W', close[1], barmerge.gaps_off, barmerge.lookahead_on)
+//------------------------------------------------------------------------------
+// INTERMEDIATE STEP : Historical Pivot
+AUTO = "Auto"
+DAILY = "Daily"
+WEEKLY = "Weekly"
+MONTHLY = "Monthly"
+QUARTERLY = "Quarterly"
+YEARLY = "Yearly"
+BIYEARLY = "Biyearly"
+TRIYEARLY = "Triyearly"
+QUINQUENNIALLY = "Quinquennially"
+DECENNIALLY = "Decennially"
+FIBONACCI = "Fibonacci"
+CAMARILLA = "Camarilla"
+TRADITIONAL = "Traditional"
+WOODIE = "Woodie"
+PIVOTBOSS = "PivotBoss"
+VPR = "VPR"
+show_hist_pivots = input.bool(title="Show Pivots?", defval=true, group="Dynamic Pivots")
+show_hist_pivots_only_today = input.bool(title="Hide Historical Pivots?", defval=true, group="Dynamic Pivots")
+show_hist_pivots_pivot_only = input.bool(title="Show Central Pivot?", defval=true, group="Dynamic Pivots")
+show_hist_pivots_CPR = input.bool(title="Show TC/BC for CPR?", defval=true, group="Dynamic Pivots")
+show_hist_pivots_rs = input.bool(title="Show Pivot R/S?", defval=true, group="Dynamic Pivots")
+show_camarilla_full = input.bool(title="Show Full Camarilla Levels?", defval=true, group="Dynamic Pivots")
+show_hist_pdhpdl = input.bool(title="Show PDH/PDL Levels?", defval=true, group="Dynamic Pivots", inline="PdhPdl")
+pdhpdl_color  = input(color.white, ""     , inline="PdhPdl",group="Dynamic Pivots")
+show_poc = input.bool(title="Show Point of Control?", defval=true, group="Dynamic Pivots", inline="POC")
+poc_color  = input(color.white, ""     , inline="POC",group="Dynamic Pivots")
+show_money_zones = input.bool(title="Show Money Zones?", defval=true, group="Dynamic Pivots", inline="moneyZone")
+moneyZone_color  = input(color.white, ""     , inline="moneyZone",group="Dynamic Pivots")
+show_labels = input.bool(title="Show Pivot Labels?", defval=true, group="Dynamic Pivots")
+show_prices = input.bool(title="Show Pivot Prices?", defval=true, group="Dynamic Pivots")
+show_tomorrow_cpr_pivots = input.bool(title="Show Tomorrow CPR + Pivots?", defval=false, group="Dynamic Pivots")
+sat_sun = input.bool(false, title  = 'Saturday and sunday are holidays', group = 'Dynamic Pivots', tooltip = 'Turn on during sunday and saturday only')
+is_daily_based = input.bool(title="Use Daily-based Values", defval=true, tooltip="When this option is unchecked, Pivot Points will use intraday data while calculating on intraday charts. If Extended Hours are displayed on the chart, they will be taken into account during the pivot level calculation. If intraday OHLC values are different from daily-based values (normal for stocks), the pivot levels will also differ.", group="Dynamic Pivots")
+kind = input.string(title="Type", defval="Fibonacci", options=[FIBONACCI, CAMARILLA, TRADITIONAL, PIVOTBOSS, VPR], group="Dynamic Pivots")
+pivot_time_frame = input.string(title="Pivots Timeframe", defval=AUTO, options=[AUTO, DAILY, WEEKLY, MONTHLY, QUARTERLY, YEARLY, BIYEARLY, TRIYEARLY, QUINQUENNIALLY, DECENNIALLY], group="Dynamic Pivots")
+position_labels = input.string("Right", "Historical Pivot Labels Position", options=["Left", "Right"], group="Dynamic Pivots")
+look_back = input.int(title="Number of Pivots Back", defval=15, minval=1, maxval=5000, group="Dynamic Pivots")
+line_width = input.int(title="Line Width", defval=1, minval=1, maxval=100, group="Dynamic Pivots")
+//------------------------------------------------------------------------------
+// STEP 3 - FIB PIVOTS LINES
+// Functions
+
+draw_label_vpr(_x, _y, _text, _xloc, _yloc, _color, _style, _textcolor, _size, _textalign, _tooltip) =>
+    dlabel = label.new(x=_x, y=_y, text=_text, xloc=_xloc, yloc=_yloc, color=_color, style=_style, textcolor=_textcolor, size=_size,textalign=_textalign, tooltip=_tooltip)
+    label.delete(dlabel[1])
+
+//Inputs
+show_fibpiv   = input(false   , "Show Extra Fibonacci Pivots?", inline="Show Fibonacci Pivots?",group="Extra Fib Pivot")
+show_fibpiv_labels   = input(false   , "Show Extra Fibonacci Pivot Labels?", inline="Show Fibonacci Pivots?",group="Extra Fib Pivot")
+tfselect = input.timeframe(title='Fib Pivot Time Frame', defval='D', options=['D', 'M', 'W'],group="Extra Fib Pivot")
+rightShift = input.int(title='Pivot Label offset', defval=20, step=1,group="Extra Fib Pivot")
+
+showR1 = input.bool(title='R1' , defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR2 = input.bool(title='R2' , defval=true, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR3 = input.bool(title='R3' , defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR4 = input.bool(title='R4' , defval=true, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR5 = input.bool(title='R5' , defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR6 = input.bool(title='R6' , defval=true, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR7 = input.bool(title='R7' , defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR8 = input.bool(title='R8' , defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR9 = input.bool(title='R9' , defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR10 = input.bool(title='R10', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR11 = input.bool(title='R11', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR12 = input.bool(title='R12', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR13 = input.bool(title='R13', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR14 = input.bool(title='R14', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR15 = input.bool(title='R15', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR16 = input.bool(title='R16', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR17 = input.bool(title='R17', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR18 = input.bool(title='R18', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR19 = input.bool(title='R19', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR20 = input.bool(title='R20', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR21 = input.bool(title='R21', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR22 = input.bool(title='R22', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+showR23 = input.bool(title='R23', defval=false, inline='R12345', group='Extra Fib Pivot', tooltip='')
+
+showS1 = input.bool(title='S1', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS2 = input.bool(title='S2', defval=true, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS3 = input.bool(title='S3', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS4 = input.bool(title='S4', defval=true, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS5 = input.bool(title='S5', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS6 = input.bool(title='S6', defval=true, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS7 = input.bool(title='S7', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS8 = input.bool(title='S8', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS9 = input.bool(title='S9', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS10 = input.bool(title='S10', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS11 = input.bool(title='S11', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS12 = input.bool(title='S12', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS13 = input.bool(title='S13', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS14 = input.bool(title='S14', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS15 = input.bool(title='S15', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS16 = input.bool(title='S16', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS17 = input.bool(title='S17', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS18 = input.bool(title='S18', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS19 = input.bool(title='S19', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS20 = input.bool(title='S20', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS21 = input.bool(title='S21', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS22 = input.bool(title='S22', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+showS23 = input.bool(title='S23', defval=false, inline='S12345', group='Extra Fib Pivot', tooltip='')
+
+fibonacci_levelr1 = 0.236
+fibonacci_levelr2 = 0.382
+fibonacci_levelr3 = 0.5
+fibonacci_levelr4 = 0.618
+fibonacci_levelr5 = 0.786
+fibonacci_levelr6 = 1
+fibonacci_levelr7 = 1.272
+fibonacci_levelr8 = 1.414
+fibonacci_levelr9 = 1.618
+fibonacci_levelr10 = 2
+fibonacci_levelr11 = 2.272
+fibonacci_levelr12 = 2.414
+fibonacci_levelr13 = 2.618
+fibonacci_levelr14 = 3
+fibonacci_levelr15 = 3.272
+fibonacci_levelr16 = 3.414
+fibonacci_levelr17 = 3.618
+fibonacci_levelr18 = 4
+fibonacci_levelr19 = 4.236
+fibonacci_levelr20 = 4.272
+fibonacci_levelr21 = 4.414
+fibonacci_levelr22 = 4.618
+fibonacci_levelr23 = 4.764
+
+fibonacci_levels1 = 0.236
+fibonacci_levels2 = 0.382
+fibonacci_levels3 = 0.5
+fibonacci_levels4 = 0.618
+fibonacci_levels5 = 0.786
+fibonacci_levels6 = 1
+fibonacci_levels7 = 1.272
+fibonacci_levels8 = 1.414
+fibonacci_levels9 = 1.618
+fibonacci_levels10 = 2
+fibonacci_levels11 = 2.272
+fibonacci_levels12 = 2.414
+fibonacci_levels13 = 2.618
+fibonacci_levels14 = 3
+fibonacci_levels15 = 3.272
+fibonacci_levels16 = 3.414
+fibonacci_levels17 = 3.618
+fibonacci_levels18 = 4
+fibonacci_levels19 = 4.236
+fibonacci_levels20 = 4.272
+fibonacci_levels21 = 4.414
+fibonacci_levels22 = 4.618
+fibonacci_levels23 = 4.764
+
+//------------------------------------------------------------------------------
+//Calc
+High = request.security(syminfo.ticker, tfselect, high[1], barmerge.gaps_off, barmerge.lookahead_on)
+Low = request.security(syminfo.ticker, tfselect, low[1], barmerge.gaps_off, barmerge.lookahead_on)
+Close = request.security(syminfo.ticker, tfselect, close[1], barmerge.gaps_off, barmerge.lookahead_on)
+start = request.security(syminfo.ticker, tfselect, time, barmerge.gaps_off, barmerge.lookahead_on)
+last = request.security(syminfo.ticker, tfselect, ta.valuewhen(barstate.islast, time, 0), barmerge.gaps_off, barmerge.lookahead_on)
+newDay = ta.change(start)
+
+// Compute Fibonacci Levels + CPR
+lastDay = start >= last
+pp = (High + Low + Close) / 3
+//------------------------------------------------------------------------------
+R1 = pp + (High - Low) * fibonacci_levelr1
+R2 = pp + (High - Low) * fibonacci_levelr2
+R3 = pp + (High - Low) * fibonacci_levelr3
+R4 = pp + (High - Low) * fibonacci_levelr4
+R5 = pp + (High - Low) * fibonacci_levelr5
+R6 = pp + (High - Low) * fibonacci_levelr6
+R7 = pp + (High - Low) * fibonacci_levelr7
+R8 = pp + (High - Low) * fibonacci_levelr8
+R9 = pp + (High - Low) * fibonacci_levelr9
+R10 = pp + (High - Low) * fibonacci_levelr10
+R11 = pp + (High - Low) * fibonacci_levelr11
+R12 = pp + (High - Low) * fibonacci_levelr12
+R13 = pp + (High - Low) * fibonacci_levelr13
+R14 = pp + (High - Low) * fibonacci_levelr14
+R15 = pp + (High - Low) * fibonacci_levelr15
+R16 = pp + (High - Low) * fibonacci_levelr16
+R17 = pp + (High - Low) * fibonacci_levelr17
+R18 = pp + (High - Low) * fibonacci_levelr18
+R19 = pp + (High - Low) * fibonacci_levelr19
+R20 = pp + (High - Low) * fibonacci_levelr20
+R21 = pp + (High - Low) * fibonacci_levelr21
+R22 = pp + (High - Low) * fibonacci_levelr22
+R23 = pp + (High - Low) * fibonacci_levelr23
+
+S1 = pp - (High - Low) * fibonacci_levels1
+S2 = pp - (High - Low) * fibonacci_levels2
+S3 = pp - (High - Low) * fibonacci_levels3
+S4 = pp - (High - Low) * fibonacci_levels4
+S5 = pp - (High - Low) * fibonacci_levels5
+S6 = pp - (High - Low) * fibonacci_levels6
+S7 = pp - (High - Low) * fibonacci_levels7
+S8 = pp - (High - Low) * fibonacci_levels8
+S9 = pp - (High - Low) * fibonacci_levels9
+S10 = pp - (High - Low) * fibonacci_levels10
+S11 = pp - (High - Low) * fibonacci_levels11
+S12 = pp - (High - Low) * fibonacci_levels12
+S13 = pp - (High - Low) * fibonacci_levels13
+S14 = pp - (High - Low) * fibonacci_levels14
+S15 = pp - (High - Low) * fibonacci_levels15
+S16 = pp - (High - Low) * fibonacci_levels16
+S17 = pp - (High - Low) * fibonacci_levels17
+S18 = pp - (High - Low) * fibonacci_levels18
+S19 = pp - (High - Low) * fibonacci_levels19
+S20 = pp - (High - Low) * fibonacci_levels20
+S21 = pp - (High - Low) * fibonacci_levels21
+S22 = pp - (High - Low) * fibonacci_levels22
+S23 = pp - (High - Low) * fibonacci_levels23
+
+// Plot Lines + Text
+PivotMidLine =passlock and show_fibpiv and lastDay ? line.new(oTime, pp, cTime, pp, xloc=xloc.bar_time, color=color.blue,extend=extend.right) : na
+
+if(showR1)
+    R1Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R1, cTime, R1, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR2)
+    R2Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R2, cTime, R2, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR3)
+    R3Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R3, cTime, R3, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR4)
+    R4Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R4, cTime, R4, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR5)
+    R5Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R5, cTime, R5, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR6)
+    R6Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R6, cTime, R6, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR7)
+    R7Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R7, cTime, R7, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR8)
+    R8Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R8, cTime, R8, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR9)
+    R9Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R9, cTime, R9, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR10)
+    R10Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R10, cTime, R10, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR11)
+    R11Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R11, cTime, R11, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR12)
+    R12Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R12, cTime, R12, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR13)
+    R13Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R13, cTime, R13, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR14)
+    R14Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R14, cTime, R14, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR15)
+    R15Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R15, cTime, R15, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR16)
+    R16Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R16, cTime, R16, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR17)
+    R17Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R17, cTime, R17, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR18)
+    R18Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R18, cTime, R18, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR19)
+    R19Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R19, cTime, R19, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR20)
+    R20Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R20, cTime, R20, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR21)
+    R21Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R21, cTime, R21, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR22)
+    R22Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R22, cTime, R22, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showR23)
+    R23Line = passlock and show_fibpiv and lastDay ? line.new(oTime, R23, cTime, R23, xloc=xloc.bar_time, color=color.red,extend=extend.right) : na
+if(showS1)
+    S1Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S1, cTime, S1, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS2)
+    S2Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S2, cTime, S2, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS3)
+    S3Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S3, cTime, S3, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS4)
+    S4Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S4, cTime, S4, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS5)
+    S5Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S5, cTime, S5, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS6)
+    S6Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S6, cTime, S6, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS7)
+    S7Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S7, cTime, S7, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS8)
+    S8Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S8, cTime, S8, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS9)
+    S9Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S9, cTime, S9, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS10)
+    S10Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S10, cTime, S10, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS11)
+    S11Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S11, cTime, S11, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS12)
+    S12Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S12, cTime, S12, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS13)
+    S13Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S13, cTime, S13, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS14)
+    S14Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S14, cTime, S14, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS15)
+    S15Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S15, cTime, S15, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS16)
+    S16Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S16, cTime, S16, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS17)
+    S17Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S17, cTime, S17, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS18)
+    S18Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S18, cTime, S18, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS19)
+    S19Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S19, cTime, S19, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS20)
+    S20Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S20, cTime, S20, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS21)
+    S21Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S21, cTime, S21, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS22)
+    S22Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S22, cTime, S22, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+if(showS23)
+    S23Line =passlock and show_fibpiv and lastDay ? line.new(oTime, S23, cTime, S23, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+
+if (show_fibpiv and lastDay and passlock and show_fibpiv_labels)
+    draw_label_vpr(bar_index[0] + rightShift, pp, "PP = " + str.tostring(pp, '0.00'), xloc.bar_index, yloc.price, color.new(color.blue, 0), label.style_none, color.new(color.blue, 0), size.normal, text.align_left, "PP = " + str.tostring(pp, '0.00'))
+    if(showR1)
+        draw_label_vpr(bar_index[0] + rightShift, R1, "R1 = " + str.tostring(R1, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R1 = " + str.tostring(R1, '0.00'))
+    if(showR2)
+        draw_label_vpr(bar_index[0] + rightShift, R2, "R2 = " + str.tostring(R2, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R2 = " + str.tostring(R2, '0.00'))
+    if(showR3)
+        draw_label_vpr(bar_index[0] + rightShift, R3, "R3 = " + str.tostring(R3, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R3 = " + str.tostring(R3, '0.00'))
+    if(showR4)
+        draw_label_vpr(bar_index[0] + rightShift, R4, "R4 = " + str.tostring(R4, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R4 = " + str.tostring(R4, '0.00'))
+    if(showR5)
+        draw_label_vpr(bar_index[0] + rightShift, R5, "R5 = " + str.tostring(R5, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R5 = " + str.tostring(R5, '0.00'))
+    if(showR6)
+        draw_label_vpr(bar_index[0] + rightShift, R6, "R6 = " + str.tostring(R6, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R6 = " + str.tostring(R6, '0.00'))
+    if(showR7)
+        draw_label_vpr(bar_index[0] + rightShift, R7, "R7 = " + str.tostring(R7, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R7 = " + str.tostring(R7, '0.00'))
+    if(showR8)
+        draw_label_vpr(bar_index[0] + rightShift, R8, "R8 = " + str.tostring(R8, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R8 = " + str.tostring(R8, '0.00'))
+    if(showR9)
+        draw_label_vpr(bar_index[0] + rightShift, R9, "R9 = " + str.tostring(R9, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R9 = " + str.tostring(R9, '0.00'))
+    if(showR10)
+        draw_label_vpr(bar_index[0] + rightShift, R10, "R10 = " + str.tostring(R10, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R10 = " + str.tostring(R10, '0.00'))
+    if(showR11)
+        draw_label_vpr(bar_index[0] + rightShift, R11, "R11 = " + str.tostring(R11, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R11 = " + str.tostring(R11, '0.00'))
+    if(showR12)
+        draw_label_vpr(bar_index[0] + rightShift, R12, "R12 = " + str.tostring(R12, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R12 = " + str.tostring(R12, '0.00'))
+    if(showR13)
+        draw_label_vpr(bar_index[0] + rightShift, R13, "R13 = " + str.tostring(R13, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R13 = " + str.tostring(R13, '0.00'))
+    if(showR14)
+        draw_label_vpr(bar_index[0] + rightShift, R14, "R14 = " + str.tostring(R14, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R14 = " + str.tostring(R14, '0.00'))
+    if(showR15)
+        draw_label_vpr(bar_index[0] + rightShift, R15, "R15 = " + str.tostring(R15, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R15 = " + str.tostring(R15, '0.00'))
+    if(showR16)
+        draw_label_vpr(bar_index[0] + rightShift, R16, "R16 = " + str.tostring(R16, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R16 = " + str.tostring(R16, '0.00'))
+    if(showR17)
+        draw_label_vpr(bar_index[0] + rightShift, R17, "R17 = " + str.tostring(R17, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R17 = " + str.tostring(R17, '0.00'))
+    if(showR18)
+        draw_label_vpr(bar_index[0] + rightShift, R18, "R18 = " + str.tostring(R18, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R18 = " + str.tostring(R18, '0.00'))
+    if(showR19)
+        draw_label_vpr(bar_index[0] + rightShift, R19, "R19 = " + str.tostring(R19, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R19 = " + str.tostring(R19, '0.00'))
+    if(showR20)
+        draw_label_vpr(bar_index[0] + rightShift, R20, "R20 = " + str.tostring(R20, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R20 = " + str.tostring(R20, '0.00'))
+    if(showR21)
+        draw_label_vpr(bar_index[0] + rightShift, R21, "R21 = " + str.tostring(R21, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R21 = " + str.tostring(R21, '0.00'))
+    if(showR22)
+        draw_label_vpr(bar_index[0] + rightShift, R22, "R22 = " + str.tostring(R22, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R22 = " + str.tostring(R22, '0.00'))
+    if(showR23)
+        draw_label_vpr(bar_index[0] + rightShift, R23, "R23 = " + str.tostring(R23, '0.00'), xloc.bar_index, yloc.price, color.new(color.red, 0), label.style_none, color.new(color.red, 0), size.normal, text.align_left, "R23 = " + str.tostring(R23, '0.00'))
+    if(showS1)
+        draw_label_vpr(bar_index[0] + rightShift, S1, "S1 = " + str.tostring(S1, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S1 = " + str.tostring(S1, '0.00'))
+    if(showS2)
+        draw_label_vpr(bar_index[0] + rightShift, S2, "S2 = " + str.tostring(S2, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S2 = " + str.tostring(S2, '0.00'))
+    if(showS3)
+        draw_label_vpr(bar_index[0] + rightShift, S3, "S3 = " + str.tostring(S3, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S3 = " + str.tostring(S3, '0.00'))
+    if(showS4)
+        draw_label_vpr(bar_index[0] + rightShift, S4, "S4 = " + str.tostring(S4, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S4 = " + str.tostring(S4, '0.00'))
+    if(showS5)
+        draw_label_vpr(bar_index[0] + rightShift, S5, "S5 = " + str.tostring(S5, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S5 = " + str.tostring(S5, '0.00'))
+    if(showS6)
+        draw_label_vpr(bar_index[0] + rightShift, S6, "S6 = " + str.tostring(S6, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S6 = " + str.tostring(S6, '0.00'))
+    if(showS7)
+        draw_label_vpr(bar_index[0] + rightShift, S7, "S7 = " + str.tostring(S7, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S7 = " + str.tostring(S7, '0.00'))
+    if(showS8)
+        draw_label_vpr(bar_index[0] + rightShift, S8, "S8 = " + str.tostring(S8, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S8 = " + str.tostring(S8, '0.00'))
+    if(showS9)
+        draw_label_vpr(bar_index[0] + rightShift, S9, "S9 = " + str.tostring(S9, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S9 = " + str.tostring(S9, '0.00'))
+    if(showS10)
+        draw_label_vpr(bar_index[0] + rightShift, S10, "S10 = " + str.tostring(S10, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S10 = " + str.tostring(S10, '0.00'))
+    if(showS11)
+        draw_label_vpr(bar_index[0] + rightShift, S11, "S11 = " + str.tostring(S11, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S11 = " + str.tostring(S11, '0.00'))
+    if(showS12)
+        draw_label_vpr(bar_index[0] + rightShift, S12, "S12 = " + str.tostring(S12, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S12 = " + str.tostring(S12, '0.00'))
+    if(showS13)
+        draw_label_vpr(bar_index[0] + rightShift, S13, "S13 = " + str.tostring(S13, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S13 = " + str.tostring(S13, '0.00'))
+    if(showS14)
+        draw_label_vpr(bar_index[0] + rightShift, S14, "S14 = " + str.tostring(S14, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S14 = " + str.tostring(S14, '0.00'))
+    if(showS15)
+        draw_label_vpr(bar_index[0] + rightShift, S15, "S15 = " + str.tostring(S15, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S15 = " + str.tostring(S15, '0.00'))
+    if(showS16)
+        draw_label_vpr(bar_index[0] + rightShift, S16, "S16 = " + str.tostring(S16, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S16 = " + str.tostring(S16, '0.00'))
+    if(showS17)
+        draw_label_vpr(bar_index[0] + rightShift, S17, "S17 = " + str.tostring(S17, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S17 = " + str.tostring(S17, '0.00'))
+    if(showS18)
+        draw_label_vpr(bar_index[0] + rightShift, S18, "S18 = " + str.tostring(S18, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S18 = " + str.tostring(S18, '0.00'))
+    if(showS19)
+        draw_label_vpr(bar_index[0] + rightShift, S19, "S19 = " + str.tostring(S19, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S19 = " + str.tostring(S19, '0.00'))
+    if(showS20)
+        draw_label_vpr(bar_index[0] + rightShift, S20, "S20 = " + str.tostring(S20, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S20 = " + str.tostring(S20, '0.00'))
+    if(showS21)
+        draw_label_vpr(bar_index[0] + rightShift, S21, "S21 = " + str.tostring(S21, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S21 = " + str.tostring(S21, '0.00'))
+    if(showS22)
+        draw_label_vpr(bar_index[0] + rightShift, S22, "S22 = " + str.tostring(S22, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S22 = " + str.tostring(S22, '0.00'))
+    if(showS23)
+        draw_label_vpr(bar_index[0] + rightShift, S23, "S23 = " + str.tostring(S23, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "S23 = " + str.tostring(S23, '0.00'))
+//------------------------------------------------------------------------------
+//STEP 1 - Cont'd Show hiLine only on New Day
+hiLine = passlock and show_rect and lastDay ? line.new(oTime, high_plot, cTime, high_plot, xloc=xloc.bar_time, color=hiPlotColor) : na
+midLine = passlock and show_rect and lastDay ? line.new(oTime, mid, cTime, mid, xloc=xloc.bar_time, color=midPlotColor) : na
+loLine = passlock and show_rect and lastDay ? line.new(oTime, low_plot, cTime, low_plot, xloc=xloc.bar_time, color=loPlotColor) : na
+
+hiLine_30 = show_rect_2 ? line.new(oTime_2, high_plot_2, cTime_2, high_plot_2, xloc=xloc.bar_time, color=hiPlotColor_2) : na
+midLine_30 = show_rect_2 ? line.new(oTime_2, mid_2, cTime_2, mid_2, xloc=xloc.bar_time, color=midPlotColor_2) : na
+loLine_30 = show_rect_2 ? line.new(oTime_2, low_plot_2, cTime_2, low_plot_2, xloc=xloc.bar_time, color=loPlotColor_2) : na
+
+hiLine_MCX = show_rect_4h ? line.new(oTime_4h, high_plot_4h, cTime_4h, high_plot_4h, xloc=xloc.bar_time, color=hiPlotColor_4h) : na
+midLine_MCX = show_rect_4h ? line.new(oTime_4h, mid_4h, cTime_4h, mid_4h, xloc=xloc.bar_time, color=midPlotColor_4h) : na
+loLine_MCX = show_rect_4h ? line.new(oTime_4h, low_plot_4h, cTime_4h, low_plot_4h, xloc=xloc.bar_time, color=loPlotColor_4h) : na
+//------------------------------------------------------------------------------
+// // STEP 4 - Add Buy/Sell Signal ------------------------------------------WIP
+// Buy = ta.crossover(low, high_plot)
+// Short = ta.crossunder(high, low_plot)
+
+// //indicates the buy or sell signal
+// plotshape(show_rect and lastDay ? Buy : na, style=shape.labeldown, location=location.abovebar, color=color.new(hiPlotColor, 0), title='Buy', text='15HBO', textcolor=color.new(color.white, 0))
+// plotshape(show_rect and lastDay ? Short : na, style=shape.labelup, location=location.belowbar, color=color.new(loPlotColor, 0), title='Sell', text='15LBD', textcolor=color.new(color.white, 0))
+//------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------
+// VWAP
+
+var cumVol = 0.
+cumVol += nz(volume)
+// if barstate.islast and cumVol == 0
+    // runtime.error("No volume is provided by the data vendor.")
+    
+computeVWAP(src, isNewPeriod, stDevMultiplier) =>
+    var float sumSrcVol = na
+    var float sumVol = na
+    var float sumSrcSrcVol = na
+
+    sumSrcVol := isNewPeriod ? src * volume : src * volume + sumSrcVol[1]
+    sumVol := isNewPeriod ? volume : volume + sumVol[1]
+    // sumSrcSrcVol calculates the dividend of the equation that is later used to calculate the standard deviation
+    sumSrcSrcVol := isNewPeriod ? volume * math.pow(src, 2) : volume * math.pow(src, 2) + sumSrcSrcVol[1]
+
+    _vwap = sumSrcVol / sumVol
+    variance = sumSrcSrcVol / sumVol - math.pow(_vwap, 2)
+    variance := variance < 0 ? 0 : variance
+    stDev = math.sqrt(variance)
+
+    lowerBand = _vwap - stDev * stDevMultiplier
+    upperBand = _vwap + stDev * stDevMultiplier
+
+    [_vwap, lowerBand, upperBand]
+
+showVWAP = input(false, title="Show VWAP?", group="VWAP Settings")
+hideonDWM = input(false, title="Hide VWAP on 1D or Above", group="VWAP Settings")
+var anchor = input.string(defval = "Session", title="Anchor Period",
+ options=["Session", "Week", "Month", "Quarter", "Year", "Decade", "Century", "Earnings", "Dividends", "Splits"], group="VWAP Settings")
+src = input(title = "Source", defval = hlc3, group="VWAP Settings")
+offset = input(0, title="Offset", group="VWAP Settings")
+
+showBands = input(false, title="Calculate Bands", group="VWAP Settings")
+stdevMult = input(1.0, title="Bands Multiplier", group="VWAP Settings")
+
+timeChange(period) =>
+    ta.change(time(period))
+
+new_earnings = request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_dividends = request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_split = request.splits(syminfo.tickerid, splits.denominator, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+
+isNewPeriod = switch anchor
+    "Earnings" => not na(new_earnings)
+    "Dividends" => not na(new_dividends)
+    "Splits" => not na(new_split)
+    "Session" => timeChange("D")
+    "Week" => timeChange("W")
+    "Month" => timeChange("M")
+    "Quarter" => timeChange("3M")
+    "Year" => timeChange("12M")
+    "Decade" => timeChange("12M") and year % 10 == 0
+    "Century" => timeChange("12M") and year % 100 == 0
+    => false
+
+isEsdAnchor = anchor == "Earnings" or anchor == "Dividends" or anchor == "Splits"
+if na(src[1]) and not isEsdAnchor
+    isNewPeriod := true
+
+float vwapValue = na
+float std = na
+float upperBandValue = na
+float lowerBandValue = na
+
+if not (hideonDWM and timeframe.isdwm)
+    [_vwap, bottom, top] = computeVWAP(src, isNewPeriod, stdevMult)
+    vwapValue := _vwap
+    upperBandValue := showBands ? top : na
+    lowerBandValue := showBands ? bottom : na
+
+plot(showVWAP ? vwapValue : na, title="VWAP", color=#2962FF, offset=offset)
+
+upperBand = plot(showVWAP ? upperBandValue : na, title="Upper Band", color=color.green, offset=offset)
+lowerBand = plot(showVWAP ? lowerBandValue : na, title="Lower Band", color=color.green, offset=offset)
+
+fill(upperBand, lowerBand, title="Bands Fill", color= showBands ? color.new(color.green, 95) : na)
+//----------------------------------------------------------------------------------------------------
+//SuperTrend
+PlotSTrend = input(title='Plot Super Trend?', defval=false, group="Super Trend Settings")
+InputFactor = input.int(3, minval=1, maxval=100, title='Factor', group="Super Trend Settings")
+InputLength = input.int(10, minval=1, maxval=100, title='Length', group="Super Trend Settings")
+BasicUpperBand = hl2 - InputFactor * ta.atr(InputLength)
+BasicLowerBand = hl2 + InputFactor * ta.atr(InputLength)
+FinalUpperBand = 0.0
+FinalLowerBand = 0.0
+FinalUpperBand := close[1] > FinalUpperBand[1] ? math.max(BasicUpperBand, FinalUpperBand[1]) : BasicUpperBand
+FinalLowerBand := close[1] < FinalLowerBand[1] ? math.min(BasicLowerBand, FinalLowerBand[1]) : BasicLowerBand
+IsTrend = 0.0
+IsTrend := close > FinalLowerBand[1] ? 1 : close < FinalUpperBand[1] ? -1 : nz(IsTrend[1], 1)
+STrendline = IsTrend == 1 ? FinalUpperBand : FinalLowerBand
+linecolor = IsTrend == 1 ? color.green : color.red
+Plotline = PlotSTrend and passlock ? STrendline : na
+plot(Plotline, color=linecolor, style=plot.style_line, linewidth=1, title='SuperTrend')
+PlotShapeUp = ta.cross(close, STrendline) and close > STrendline
+PlotShapeDown = ta.cross(STrendline, close) and close < STrendline
+plotshape(PlotSTrend and passlock ? PlotShapeUp : na, 'Up Arrow', shape.triangleup, location.belowbar, color.new(color.green, 0), 0)
+plotshape(PlotSTrend and passlock ? PlotShapeDown : na, 'Down Arrow', shape.triangledown, location.abovebar, color.new(color.red, 0), 0)
+//----------------------------------------------------------------------------------------------------
+// Historical Pivots
+var DEF_COLOR = #FB8C00
+var arr_time = array.new_int()
+var pdh = array.new_float()
+var pdl = array.new_float()
+var p = array.new_float()
+var tc = array.new_float()
+var bc = array.new_float()
+var r1 = array.new_float()
+var s1 = array.new_float()
+var r2 = array.new_float()
+var s2 = array.new_float()
+var r3 = array.new_float()
+var s3 = array.new_float()
+var r4 = array.new_float()
+var s4 = array.new_float()
+var r5 = array.new_float()
+var s5 = array.new_float()
+pivotX_open = float(na)
+pivotX_open := nz(pivotX_open[1], open)
+pivotX_high = float(na)
+pivotX_high := nz(pivotX_high[1], high)
+pivotX_low = float(na)
+pivotX_low := nz(pivotX_low[1], low)
+pivotX_prev_open = float(na)
+pivotX_prev_open := nz(pivotX_prev_open[1])
+pivotX_prev_high = float(na)
+pivotX_prev_high := nz(pivotX_prev_high[1])
+pivotX_prev_low = float(na)
+pivotX_prev_low := nz(pivotX_prev_low[1])
+pivotX_prev_close = float(na)
+pivotX_prev_close := nz(pivotX_prev_close[1])
+
+get_pivot_resolution() =>
+    resolution = "M"
+    if pivot_time_frame == AUTO
+        if timeframe.isintraday
+            resolution := timeframe.multiplier <= 15 ? "D" : "W"
+        else if timeframe.isweekly or timeframe.ismonthly
+            resolution := "12M"
+    else if pivot_time_frame == DAILY
+        resolution := "D"
+    else if pivot_time_frame == WEEKLY
+        resolution := "W"
+    else if pivot_time_frame == MONTHLY
+        resolution := "M"
+    else if pivot_time_frame == QUARTERLY
+        resolution := "3M"
+    else if pivot_time_frame == YEARLY or pivot_time_frame == BIYEARLY or pivot_time_frame == TRIYEARLY or pivot_time_frame == QUINQUENNIALLY or pivot_time_frame == DECENNIALLY
+        resolution := "12M"
+    resolution
+
+//----------------------------------------------------------------------------------------------------
+// POC + Money Zones High + Low
+var mzh = array.new_float()
+var mzl = array.new_float()
+var poch = array.new_float()
+resolution = get_pivot_resolution()
+
+//  ||--    Inputs:
+session_timeframe = resolution
+percent_of_tpo = 0.70
+tf_high = high
+tf_low = low
+tf_close = close
+//  ||--    Bars since session started:
+session_bar_counter = bar_index - ta.valuewhen(ta.change(time(session_timeframe)) != 0, bar_index, 0)
+
+session_high = tf_high
+session_low = tf_low
+session_range = tf_high - tf_low
+
+session_high := nz(session_high[1], tf_high)
+session_low := nz(session_low[1], tf_low)
+session_range := nz(session_high - session_low, 0.0)
+
+//      ||--    recalculate session high, low and range:
+if session_bar_counter == 0
+    session_high := tf_high
+    session_low := tf_low
+    session_range := tf_high - tf_low
+    session_range
+if tf_high > session_high[1]
+    session_high := tf_high
+    session_range := session_high - session_low
+    session_range
+if tf_low < session_low[1]
+    session_low := tf_low
+    session_range := session_high - session_low
+    session_range
+
+
+//  ||--    define tpo section range:
+tpo_section_range = session_range / 21
+
+//  ||--    function to get the frequency a specified range is visited:
+f_frequency_of_range(_src, _upper_range, _lower_range, _length) =>
+    _adjusted_length = _length < 1 ? 1 : _length
+    _frequency = 0
+    for _i = 0 to _adjusted_length - 1 by 1
+        if _src[_i] >= _lower_range and _src[_i] <= _upper_range
+            _frequency += 1
+            _frequency
+    _return = nz(_frequency, 0)  // _adjusted_length
+    _return
+//  ||--    frequency the tpo range is visited:
+tpo_00 = f_frequency_of_range(tf_close, session_high, session_high - tpo_section_range * 1, session_bar_counter)
+tpo_01 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 1, session_high - tpo_section_range * 2, session_bar_counter)
+tpo_02 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 2, session_high - tpo_section_range * 3, session_bar_counter)
+tpo_03 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 3, session_high - tpo_section_range * 4, session_bar_counter)
+tpo_04 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 4, session_high - tpo_section_range * 5, session_bar_counter)
+tpo_05 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 5, session_high - tpo_section_range * 6, session_bar_counter)
+tpo_06 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 6, session_high - tpo_section_range * 7, session_bar_counter)
+tpo_07 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 7, session_high - tpo_section_range * 8, session_bar_counter)
+tpo_08 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 8, session_high - tpo_section_range * 9, session_bar_counter)
+tpo_09 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 9, session_high - tpo_section_range * 10, session_bar_counter)
+tpo_10 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 10, session_high - tpo_section_range * 11, session_bar_counter)
+tpo_11 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 11, session_high - tpo_section_range * 12, session_bar_counter)
+tpo_12 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 12, session_high - tpo_section_range * 13, session_bar_counter)
+tpo_13 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 13, session_high - tpo_section_range * 14, session_bar_counter)
+tpo_14 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 14, session_high - tpo_section_range * 15, session_bar_counter)
+tpo_15 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 15, session_high - tpo_section_range * 16, session_bar_counter)
+tpo_16 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 16, session_high - tpo_section_range * 17, session_bar_counter)
+tpo_17 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 17, session_high - tpo_section_range * 18, session_bar_counter)
+tpo_18 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 18, session_high - tpo_section_range * 19, session_bar_counter)
+tpo_19 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 19, session_high - tpo_section_range * 20, session_bar_counter)
+tpo_20 = f_frequency_of_range(tf_close, session_high - tpo_section_range * 20, session_high - tpo_section_range * 21, session_bar_counter)
+//  ||--    function to retrieve a specific tpo value
+f_get_tpo_count_1(_value) =>
+    _return = 0.0
+    if _value == 0
+        _return := tpo_00
+        _return
+    if _value == 1
+        _return := tpo_01
+        _return
+    if _value == 2
+        _return := tpo_02
+        _return
+    if _value == 3
+        _return := tpo_03
+        _return
+    if _value == 4
+        _return := tpo_04
+        _return
+    if _value == 5
+        _return := tpo_05
+        _return
+    if _value == 6
+        _return := tpo_06
+        _return
+    if _value == 7
+        _return := tpo_07
+        _return
+    if _value == 8
+        _return := tpo_08
+        _return
+    if _value == 9
+        _return := tpo_09
+        _return
+    if _value == 10
+        _return := tpo_10
+        _return
+    if _value == 11
+        _return := tpo_11
+        _return
+    if _value == 12
+        _return := tpo_12
+        _return
+    if _value == 13
+        _return := tpo_13
+        _return
+    if _value == 14
+        _return := tpo_14
+        _return
+    if _value == 15
+        _return := tpo_15
+        _return
+    if _value == 16
+        _return := tpo_16
+        _return
+    if _value == 17
+        _return := tpo_17
+        _return
+    if _value == 18
+        _return := tpo_18
+        _return
+    if _value == 19
+        _return := tpo_19
+        _return
+    if _value == 20
+        _return := tpo_20
+        _return
+    _return
+f_get_tpo_count_2(_value) =>
+    _return = 0.0
+    if _value == 0
+        _return := tpo_00
+        _return
+    if _value == 1
+        _return := tpo_01
+        _return
+    if _value == 2
+        _return := tpo_02
+        _return
+    if _value == 3
+        _return := tpo_03
+        _return
+    if _value == 4
+        _return := tpo_04
+        _return
+    if _value == 5
+        _return := tpo_05
+        _return
+    if _value == 6
+        _return := tpo_06
+        _return
+    if _value == 7
+        _return := tpo_07
+        _return
+    if _value == 8
+        _return := tpo_08
+        _return
+    if _value == 9
+        _return := tpo_09
+        _return
+    if _value == 10
+        _return := tpo_10
+        _return
+    if _value == 11
+        _return := tpo_11
+        _return
+    if _value == 12
+        _return := tpo_12
+        _return
+    if _value == 13
+        _return := tpo_13
+        _return
+    if _value == 14
+        _return := tpo_14
+        _return
+    if _value == 15
+        _return := tpo_15
+        _return
+    if _value == 16
+        _return := tpo_16
+        _return
+    if _value == 17
+        _return := tpo_17
+        _return
+    if _value == 18
+        _return := tpo_18
+        _return
+    if _value == 19
+        _return := tpo_19
+        _return
+    if _value == 20
+        _return := tpo_20
+        _return
+    _return
+
+tpo_sum = 0.0
+current_poc_position = 0.0
+current_poc_value = 0.0
+for _i = 0 to 20 by 1
+    _get_tpo_value = f_get_tpo_count_1(_i)
+    tpo_sum += _get_tpo_value
+    if _get_tpo_value > current_poc_value
+        current_poc_position := _i
+        current_poc_value := _get_tpo_value
+        current_poc_value
+poc_upper = ((session_high - tpo_section_range * current_poc_position) + session_high - tpo_section_range * (current_poc_position + 1))/2
+
+//  ||--    get value area high/low
+vah_position = current_poc_position
+val_position = current_poc_position
+current_sum = current_poc_value
+
+for _i = 0 to 20 by 1
+    if current_sum < tpo_sum * percent_of_tpo
+        vah_position := math.max(0, vah_position - 1)
+        current_sum += f_get_tpo_count_2(math.round(vah_position))
+        current_sum
+    if current_sum < tpo_sum * percent_of_tpo
+        val_position := math.min(20, val_position + 1)
+        current_sum += f_get_tpo_count_2(math.round(val_position))
+        current_sum
+
+vah_value = session_high - tpo_section_range * vah_position
+val_value = session_high - tpo_section_range * (val_position + 1)
+
+vah = ta.valuewhen(session_bar_counter == 0, vah_value[1], 0)
+val = ta.valuewhen(session_bar_counter == 0, val_value[1], 0)
+poc_u = ta.valuewhen(session_bar_counter == 0, poc_upper[1], 0)
+//----------------------------------------------------------------------------------------------------
+
+var lines = array.new_line()
+var labels = array.new_label()
+
+draw_line(i, pivot, col) =>
+    if(show_hist_pivots and passlock)
+        if array.size(arr_time) > 1
+            array.push(lines, line.new(array.get(arr_time, i), array.get(pivot, i), array.get(arr_time, i + 1), array.get(pivot, i), color=col, xloc=xloc.bar_time, width=line_width))
+
+draw_label(i, y, txt, txt_color) =>
+    if(show_hist_pivots and passlock)
+        if (show_labels or show_prices) and not na(y)
+            display_text = (show_labels ? txt : "") + (show_prices ? str.format(" ({0})", math.round_to_mintick(y)) : "")
+            label_style = position_labels == "Left" ? label.style_label_right : label.style_label_left
+            x = position_labels == "Left" ? array.get(arr_time, i) : array.get(arr_time, i + 1)
+            array.push(labels, label.new(x = x, y=y, text=display_text, textcolor=txt_color, style=label_style, color=#00000000, xloc=xloc.bar_time))
+
+fibonacci() =>
+    pivotX_Median = (pivotX_prev_high + pivotX_prev_low + pivotX_prev_close) / 3
+    pivotX_BCC = (pivotX_prev_high + pivotX_prev_low) / 2
+    pivotX_TCC = pivotX_Median - pivotX_BCC + pivotX_Median
+    pivot_range = pivotX_prev_high - pivotX_prev_low
+    array.push(pdh, pivotX_prev_high)
+    array.push(pdl, pivotX_prev_low)
+    array.push(p, pivotX_Median)
+    array.push(tc, pivotX_TCC)
+    array.push(bc, pivotX_BCC)
+    array.push(r1, pivotX_Median + 0.382 * pivot_range)
+    array.push(s1, pivotX_Median - 0.382 * pivot_range)
+    array.push(r2, pivotX_Median + 0.618 * pivot_range)
+    array.push(s2, pivotX_Median - 0.618 * pivot_range)
+    array.push(r3, pivotX_Median + 1 * pivot_range)
+    array.push(s3, pivotX_Median - 1 * pivot_range)
+    array.push(mzh, vah)
+    array.push(mzl, val)
+    array.push(poch, poc_u)
+
+camarilla() =>
+    pivotX_Median = (pivotX_prev_high + pivotX_prev_low + pivotX_prev_close) / 3
+    pivotX_BCC = (pivotX_prev_high + pivotX_prev_low) / 2
+    pivotX_TCC = pivotX_Median - pivotX_BCC + pivotX_Median
+    pivot_range = pivotX_prev_high - pivotX_prev_low
+    array.push(pdh, pivotX_prev_high)
+    array.push(pdl, pivotX_prev_low)
+    array.push(p, pivotX_Median)
+    array.push(tc, pivotX_TCC)
+    array.push(bc, pivotX_BCC)
+    array.push(r1, show_camarilla_full ? pivotX_prev_close + pivot_range * 1.1 / 12.0 : na)
+    array.push(s1, show_camarilla_full ? pivotX_prev_close - pivot_range * 1.1 / 12.0 : na)
+    array.push(r2, show_camarilla_full ? pivotX_prev_close + pivot_range * 1.1 / 6.0 : na)
+    array.push(s2, show_camarilla_full ? pivotX_prev_close - pivot_range * 1.1 / 6.0 : na)
+    array.push(r3, pivotX_prev_close + pivot_range * 1.1 / 4.0)
+    array.push(s3, pivotX_prev_close - pivot_range * 1.1 / 4.0)
+    array.push(r4, pivotX_prev_close + pivot_range * 1.1 / 2.0)
+    array.push(s4, pivotX_prev_close - pivot_range * 1.1 / 2.0)
+    r5_val = pivotX_prev_high / pivotX_prev_low * pivotX_prev_close
+    array.push(r5, r5_val)
+    array.push(s5, 2 * pivotX_prev_close - r5_val)
+    array.push(mzh, vah)
+    array.push(mzl, val)
+    array.push(poch, poc_u)
+
+traditional() =>
+    pivotX_Median = (pivotX_prev_high + pivotX_prev_low + pivotX_prev_close) / 3
+    pivotX_BCC = (pivotX_prev_high + pivotX_prev_low) / 2
+    pivotX_TCC = pivotX_Median - pivotX_BCC + pivotX_Median
+    pivot_range = pivotX_prev_high - pivotX_prev_low
+    array.push(pdh, pivotX_prev_high)
+    array.push(pdl, pivotX_prev_low)
+    array.push(p, pivotX_Median)
+    array.push(tc, pivotX_TCC)
+    array.push(bc, pivotX_BCC)
+    array.push(r1, pivotX_Median * 2 - pivotX_prev_low)
+    array.push(s1, pivotX_Median * 2 - pivotX_prev_high)
+    array.push(r2, pivotX_Median + 1 * (pivotX_prev_high - pivotX_prev_low))
+    array.push(s2, pivotX_Median - 1 * (pivotX_prev_high - pivotX_prev_low))
+    array.push(r3, pivotX_Median * 2 + (pivotX_prev_high - 2 * pivotX_prev_low))
+    array.push(s3, pivotX_Median * 2 - (2 * pivotX_prev_high - pivotX_prev_low))
+    array.push(r4, pivotX_Median * 3 + (pivotX_prev_high - 3 * pivotX_prev_low))
+    array.push(s4, pivotX_Median * 3 - (3 * pivotX_prev_high - pivotX_prev_low))
+    array.push(r5, pivotX_Median * 4 + (pivotX_prev_high - 4 * pivotX_prev_low))
+    array.push(s5, pivotX_Median * 4 - (4 * pivotX_prev_high - pivotX_prev_low))
+    array.push(mzh, vah)
+    array.push(mzl, val)
+    array.push(poch, poc_u)
+
+pivotboss() =>
+    pivotX_Median = (pivotX_prev_high + pivotX_prev_low + pivotX_prev_close) / 3
+    pivotX_BCC = (pivotX_prev_high + pivotX_prev_low) / 2
+    pivotX_TCC = pivotX_Median - pivotX_BCC + pivotX_Median
+    pivot_range = pivotX_prev_high - pivotX_prev_low
+    array.push(pdh, pivotX_prev_high)
+    array.push(pdl, pivotX_prev_low)
+    array.push(p, pivotX_Median)
+    array.push(tc, pivotX_TCC)
+    array.push(bc, pivotX_BCC)
+    array.push(r1,pivotX_prev_high + (pivotX_prev_high - pivotX_prev_low) * 0.25)
+    array.push(r2,pivotX_prev_high + (pivotX_prev_high - pivotX_prev_low) * 0.50)
+    array.push(r3,pivotX_prev_high + (pivotX_prev_high - pivotX_prev_low) * 0.75)
+    array.push(r4,pivotX_prev_high + pivotX_prev_high - pivotX_prev_low)
+    array.push(s1,pivotX_prev_low - (pivotX_prev_high - pivotX_prev_low) * 0.25)
+    array.push(s2,pivotX_prev_low - (pivotX_prev_high - pivotX_prev_low) * 0.50)
+    array.push(s3,pivotX_prev_low - (pivotX_prev_high - pivotX_prev_low) * 0.75)
+    array.push(s4,pivotX_prev_low - (pivotX_prev_high - pivotX_prev_low))
+    array.push(mzh, vah)
+    array.push(mzl, val)
+    array.push(poch, poc_u)
+
+vpr() =>
+    pivotX_Median = (pivotX_prev_high + pivotX_prev_low + pivotX_prev_close) / 3
+    pivotX_BCC = (pivotX_prev_high + pivotX_prev_low) / 2
+    pivotX_TCC = pivotX_Median - pivotX_BCC + pivotX_Median
+    pivot_range = pivotX_prev_high - pivotX_prev_low
+    array.push(tc, pivotX_TCC)
+    array.push(bc, pivotX_BCC)
+    array.push(pdh, pivotX_prev_high)
+    array.push(pdl, pivotX_prev_low)
+    array.push(mzh, vah)
+    array.push(mzl, val)
+    array.push(poch, poc_u)
+    array.push(s1,(pivotX_prev_open + pivotX_prev_high) / 2)
+    array.push(r2,(pivotX_prev_open + pivotX_prev_close) / 2)
+    array.push(s2,(pivotX_prev_open + pivotX_prev_low) / 2)
+    array.push(r3,(pivotX_prev_high + pivotX_prev_low) / 2)
+    array.push(s3,(pivotX_prev_high + pivotX_prev_close) / 2)
+    array.push(r4,(pivotX_prev_low + pivotX_prev_close) / 2)
+    array.push(p,(pivotX_prev_high + pivotX_prev_low + pivotX_prev_close) / 3)
+    array.push(r5,(pivotX_prev_open + pivotX_prev_low + pivotX_prev_close) / 3)
+    array.push(s5,(pivotX_prev_open + pivotX_prev_high + pivotX_prev_low) / 3)
+    array.push(s4, (pivotX_prev_open + pivotX_prev_high + pivotX_prev_close) / 3)
+    array.push(r1,(pivotX_prev_high + pivotX_prev_low + pivotX_prev_close + pivotX_prev_open) / 4)
+
+calc_pivot() =>
+    if kind == FIBONACCI
+        fibonacci()
+    else if kind == CAMARILLA
+        camarilla()
+    else if kind == TRADITIONAL
+        traditional()
+    else if kind == PIVOTBOSS
+        pivotboss()
+    else if kind == VPR
+        vpr()
+
+//resolution = get_pivot_resolution()
+
+SIMPLE_DIVISOR = -1
+custom_years_divisor = switch pivot_time_frame
+    BIYEARLY => 2
+    TRIYEARLY => 3
+    QUINQUENNIALLY => 5
+    DECENNIALLY => 10
+    => SIMPLE_DIVISOR
+
+calc_high(prev, curr) =>
+    if na(prev) or na(curr)
+        nz(prev, nz(curr, na))
+    else
+        math.max(prev, curr)
+    
+calc_low(prev, curr) =>
+    if not na(prev) and not na(curr)
+        math.min(prev, curr)
+    else
+        nz(prev, nz(curr, na))
+
+calc_OHLC_for_pivot(custom_years_divisor) =>
+    if custom_years_divisor == SIMPLE_DIVISOR 
+        [open, high, low, close, open[1], high[1], low[1], close[1], time[1], time_close]
+    else
+        var prev_sec_open = float(na)
+        var prev_sec_high = float(na)
+        var prev_sec_low = float(na)
+        var prev_sec_close = float(na)
+        var prev_sec_time = int(na)
+        var curr_sec_open = float(na)
+        var curr_sec_high = float(na)
+        var curr_sec_low = float(na)
+        var curr_sec_close = float(na)
+        if year(time_close) % custom_years_divisor == 0
+            curr_sec_open := open
+            curr_sec_high := high
+            curr_sec_low := low
+            curr_sec_close := close
+            prev_sec_high := high[1]
+            prev_sec_low := low[1]
+            prev_sec_close := close[1]
+            prev_sec_time := time[1]
+            for i = 2 to custom_years_divisor
+                prev_sec_open :=  nz(open[i], prev_sec_open)
+                prev_sec_high := calc_high(prev_sec_high, high[i])
+                prev_sec_low := calc_low(prev_sec_low, low[i])
+                prev_sec_time := nz(time[i], prev_sec_time)
+        [curr_sec_open, curr_sec_high, curr_sec_low, curr_sec_close, prev_sec_open, prev_sec_high, prev_sec_low, prev_sec_close, prev_sec_time, time_close]
+
+[sec_open, sec_high, sec_low, sec_close, prev_sec_open, prev_sec_high, prev_sec_low, prev_sec_close, prev_sec_time, sec_time] = request.security(syminfo.tickerid, resolution, calc_OHLC_for_pivot(custom_years_divisor), lookahead = barmerge.lookahead_on)
+sec_open_gaps_on = request.security(syminfo.tickerid, resolution, open, gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_on)
+
+is_change_years = custom_years_divisor > 0 and ta.change(time(resolution)) and year(time_close) % custom_years_divisor == 0
+
+var is_change = false
+var uses_current_bar = timeframe.isintraday and kind == WOODIE
+var change_time = int(na)
+is_time_change = (ta.change(time(resolution)) and custom_years_divisor == SIMPLE_DIVISOR) or is_change_years
+if is_time_change
+    change_time := time
+
+var start_time = time
+var was_last_premarket = false
+var start_calculate_in_premarket = false
+
+is_last_premarket = barstate.islast and session.ispremarket and time_close > sec_time and not was_last_premarket
+
+if is_last_premarket
+    was_last_premarket := true
+    start_calculate_in_premarket := true
+if session.ismarket
+    was_last_premarket := false
+    
+without_time_change = barstate.islast and array.size(arr_time) == 0
+is_can_calc_pivot = (not uses_current_bar and is_time_change and session.ismarket) or (ta.change(sec_open) and not start_calculate_in_premarket) or is_last_premarket or (uses_current_bar and not na(sec_open_gaps_on)) or without_time_change
+enough_bars_for_calculate = prev_sec_time >= start_time or is_daily_based
+
+if is_can_calc_pivot and enough_bars_for_calculate 
+    if array.size(arr_time) == 0 and is_daily_based
+        pivotX_prev_open := prev_sec_open[1]
+        pivotX_prev_high := prev_sec_high[1]
+        pivotX_prev_low := prev_sec_low[1]
+        pivotX_prev_close := prev_sec_close[1]
+        pivotX_open := sec_open[1]
+        pivotX_high := sec_high[1]
+        pivotX_low := sec_low[1]
+        array.push(arr_time, start_time)
+        calc_pivot()
+    
+    if is_daily_based
+        if is_last_premarket
+            pivotX_prev_open := sec_open
+            pivotX_prev_high := sec_high
+            pivotX_prev_low := sec_low
+            pivotX_prev_close := sec_close
+            pivotX_open := open
+            pivotX_high := high
+            pivotX_low := low
+        else
+            pivotX_prev_open := prev_sec_open
+            pivotX_prev_high := prev_sec_high
+            pivotX_prev_low := prev_sec_low
+            pivotX_prev_close := prev_sec_close
+            pivotX_open := sec_open
+            pivotX_high := sec_high
+            pivotX_low := sec_low
+    else
+        pivotX_prev_high := pivotX_high
+        pivotX_prev_low := pivotX_low
+        pivotX_prev_open := pivotX_open
+        pivotX_prev_close := close[1]
+        pivotX_open := open
+        pivotX_high := high
+        pivotX_low := low
+
+//    if show_tomorrow_cpr_pivots
+//        pivotX_prev_high := th_d
+//        pivotX_prev_low := tl_d
+//        pivotX_prev_close := tc_d
+
+    if barstate.islast and not is_change and array.size(arr_time) > 0 and not without_time_change
+        array.set(arr_time, array.size(arr_time) - 1, change_time)
+    else if without_time_change
+        array.push(arr_time, start_time)
+    else
+        array.push(arr_time, nz(change_time, time))
+
+    calc_pivot()
+
+    if array.size(arr_time) > look_back
+        if array.size(arr_time) > 0
+            array.shift(arr_time)
+        if array.size(p) > 0 and show_hist_pivots_pivot_only
+            array.shift(p)
+        if array.size(tc) > 0 and show_hist_pivots_CPR
+            array.shift(tc)
+            array.shift(bc)
+        if array.size(r1) > 0 and show_hist_pivots_rs
+            array.shift(r1)
+        if array.size(s1) > 0 and show_hist_pivots_rs
+            array.shift(s1)
+        if array.size(r2) > 0 and show_hist_pivots_rs
+            array.shift(r2)
+        if array.size(s2) > 0 and show_hist_pivots_rs
+            array.shift(s2)
+        if array.size(r3) > 0 and show_hist_pivots_rs
+            array.shift(r3)
+        if array.size(s3) > 0 and show_hist_pivots_rs
+            array.shift(s3)
+        if array.size(r4) > 0 and show_hist_pivots_rs
+            array.shift(r4)
+        if array.size(s4) > 0 and show_hist_pivots_rs
+            array.shift(s4)
+        if array.size(r5) > 0 and show_hist_pivots_rs
+            array.shift(r5)
+        if array.size(s5) > 0 and show_hist_pivots_rs
+            array.shift(s5)
+        if array.size(pdh) > 0 and show_hist_pdhpdl
+            array.shift(pdh)
+        if array.size(pdl) > 0 and show_hist_pdhpdl
+            array.shift(pdl)
+        if array.size(poch) > 0 and show_poc
+            array.shift(poch)
+        if array.size(mzh) > 0 and show_money_zones
+            array.shift(mzh)
+        if array.size(mzl) > 0 and show_money_zones
+            array.shift(mzl)
+    is_change := true
+else if not is_daily_based
+    pivotX_high := math.max(pivotX_high, high)
+    pivotX_low := math.min(pivotX_low, low)
+
+if barstate.islast and not is_daily_based and array.size(arr_time) == 0 
+    runtime.error("Not enough intraday data to calculate Pivot Points. Lower the Pivots Timeframe or turn on the 'Use Daily-based Values' option in the indicator settings.")
+
+if barstate.islast and array.size(arr_time) > 0 and is_change
+    is_change := false
+    if custom_years_divisor > 0
+        last_pivot_time = array.get(arr_time, array.size(arr_time) - 1)
+        pivot_timeframe = str.tostring(12 * custom_years_divisor) + "M"
+        estimate_pivot_time = last_pivot_time + timeframe.in_seconds(pivot_timeframe) * 1000
+        array.push(arr_time, estimate_pivot_time)
+    else
+        array.push(arr_time, time_close(resolution))
+
+    for i = 0 to array.size(lines) - 1
+        if array.size(lines) > 0
+            line.delete(array.shift(lines))
+        if array.size(labels) > 0
+            label.delete(array.shift(labels))
+
+    var x = 0
+    if (show_hist_pivots_only_today)
+        x := array.size(arr_time) - 2
+    else
+        x := 0        
+
+    for i = x to array.size(arr_time) - 2
+        if array.size(p) > 0 and show_hist_pivots_pivot_only
+            draw_line(i, p, color.new(color.blue, 0))
+            draw_label(i, array.get(p, i), "P", color.new(color.blue, 0))
+        if array.size(p) > 0 and show_hist_pivots_CPR
+            draw_line(i, tc, color.new(color.blue, 0))
+            draw_line(i, bc, color.new(color.blue, 0))
+            draw_label(i, array.get(bc, i), "BC", color.new(color.blue, 0))
+            draw_label(i, array.get(tc, i), "TC", color.new(color.blue, 0))
+        if array.size(r1) > 0 and show_hist_pivots_rs
+            draw_line(i, r1, color.red)
+            draw_label(i, array.get(r1, i), "R1", color.red)
+        if array.size(s1) > 0 and show_hist_pivots_rs
+            draw_line(i, s1, color.lime)
+            draw_label(i, array.get(s1, i), "S1", color.lime)
+        if array.size(r2) > 0 and show_hist_pivots_rs
+            draw_line(i, r2, color.red)
+            draw_label(i, array.get(r2, i), "R2", color.red)
+        if array.size(s2) > 0 and show_hist_pivots_rs
+            draw_line(i, s2, color.lime)
+            draw_label(i, array.get(s2, i), "S2", color.lime)
+        if array.size(r3) > 0 and show_hist_pivots_rs
+            draw_line(i, r3, color.red)
+            draw_label(i, array.get(r3, i), (kind == CAMARILLA)? "R3 - Sell Reversal" : "R3", color.red)
+        if array.size(s3) > 0 and show_hist_pivots_rs
+            draw_line(i, s3, color.lime)
+            draw_label(i, array.get(s3, i), (kind == CAMARILLA)? "S3 - Buy Reversal" : "S3", color.lime)
+        if array.size(r4) > 0 and show_hist_pivots_rs
+            draw_line(i, r4, color.red)
+            draw_label(i, array.get(r4, i), (kind == CAMARILLA)? "R4 - Bullish Breakout" : "R4", color.red)
+        if array.size(s4) > 0 and show_hist_pivots_rs
+            draw_line(i, s4, color.lime)
+            draw_label(i, array.get(s4, i), (kind == CAMARILLA)? "S4 - Bearish Breakout" : "S4", color.lime)
+        if array.size(r5) > 0 and show_hist_pivots_rs
+            draw_line(i, r5, color.red)
+            draw_label(i, array.get(r5, i), (kind == CAMARILLA)? "R5 - Breakout Target" : "R5", color.red)
+        if array.size(s5) > 0 and show_hist_pivots_rs
+            draw_line(i, s5, color.lime)
+            draw_label(i, array.get(s5, i), (kind == CAMARILLA)? "S5 - Breakout Target" : "S5", color.lime)
+        if array.size(pdh) > 0 and show_hist_pdhpdl
+            draw_line(i, pdh, pdhpdl_color)
+            draw_label(i, array.get(pdh, i), "PDH", pdhpdl_color)
+        if array.size(pdl) > 0 and show_hist_pdhpdl
+            draw_line(i, pdl, pdhpdl_color)
+            draw_label(i, array.get(pdl, i), "PDL", pdhpdl_color)
+        if array.size(pdl) > 0 and show_poc
+            draw_line(i, poch, poc_color)
+            draw_label(i, array.get(poch, i), "POC", poc_color)
+        if array.size(pdl) > 0 and show_money_zones
+            draw_line(i, mzh, moneyZone_color)
+            draw_label(i, array.get(mzh, i), "Money Zone High", moneyZone_color)
+            draw_line(i, mzl, moneyZone_color)
+            draw_label(i, array.get(mzl, i), "Money Zone Low", moneyZone_color)
+//----------------------------------------------------------------------------------------------------
+// Extend tomorrow CPR
+time_y = year(time)
+time_m = month(time)
+time_d = dayofmonth(time)
+time_3m = month(time)
+time_3m2 = year(time)
+
+if time_m == 12
+    time_y := time_y + 1
+    time_m := 1
+    time_m
+else
+    time_m += 1
+    time_m
+
+if time_m == 1 or time_m == 2 or time_m == 3
+    time_3m := 4
+if time_m == 4 or time_m == 5 or time_m == 6
+    time_3m := 7
+if time_m == 7 or time_m == 8 or time_m == 9
+    time_3m := 10
+if time_m == 10 or time_m == 11 or time_m == 12
+    time_3m := 1
+    time_3m2 := time_y + 1
+
+
+next_month = timestamp(time_y, time_m, 1, 0, 0)
+next_quarter = timestamp(time_3m2, time_3m, 1, 0, 0)
+next_quarter2 = timestamp(time_3m2, time_3m + 3, 1, 0, 0)
+next_year = timestamp(time_y + 1, 1, 1, 0, 0)
+next_year2 = timestamp(time_y + 1, 12, 1, 0, 0)
+
+
+var tom_start = 0
+var tom_end = 0
+
+if resolution == 'M'
+    tom_start := next_month
+    tom_end := tom_start + 60000 * 60 * 24 * 30
+    tom_end
+
+if resolution == '3M'
+    tom_start := next_quarter
+    tom_end := next_quarter2
+    tom_end
+
+if resolution == '12M'
+    tom_start := next_year
+    tom_end := next_year2
+    tom_end
+
+if resolution == 'W'
+    if time(timeframe.period, '0000-1200:2') and not time(timeframe.period, '0000-1200:2')[1]
+        tom_start := time + 1000 * 60 * 60 * 24 * 7
+        tom_end := tom_start + 1000 * 60 * 60 * 24 * 7
+        tom_end
+
+IsWeekend(_date) =>
+    dayofweek(_date) == 7 or dayofweek(_date) == 1
+// Skip Weekend
+SkipWeekend(_date) =>
+    if sat_sun
+        _d = dayofweek(_date)
+        _mul = _d == 6 ? 3 : _d == 7 ? 2 : 1
+        
+        _date + (_mul * 86400000)
+    else
+        _date + 86400000
+
+        
+y = year(timenow)
+m = month(timenow)
+d = dayofmonth(timenow)
+
+// Start & End time for Today's CPR
+newStart = timestamp(y, m, d, 09, 15)
+if resolution == 'D'
+    if time(timeframe.period, '0000-1200:1234567') and not time(timeframe.period, '0000-1200:1234567')[1]
+        tom_start := sat_sun ? SkipWeekend(newStart) : time + ((1000 * 60 * 60 * 24))
+        tom_end := tom_start + 1000 * 60 * 60 * 24
+        tom_end
+
+
+//Label func()
+fib_label(x_, y_, text_, textcolor_) =>
+    if str.length(str.tostring(math.round(y_))) >= 2
+        factor = math.pow(10, 2)
+        numberR = int(y_ * factor) / factor
+        label.new(x_, y_, text=text_ + ' (' + str.tostring(numberR) + ')', xloc=xloc.bar_time, textcolor=textcolor_, color=color.new(color.black, 100), style=label.style_label_lower_right)
+    else
+        label.new(x_, y_, text=text_ + ' (' + str.tostring(y_) + ')', xloc=xloc.bar_time, textcolor=textcolor_, color=color.new(color.black, 100), style=label.style_label_lower_right)
+
+tomorrowHigh = request.security(syminfo.tickerid, resolution, high, barmerge.gaps_off, barmerge.lookahead_on)
+tomorrowCLose = request.security(syminfo.tickerid, resolution, close, barmerge.gaps_off, barmerge.lookahead_on)
+tomorrowLow = request.security(syminfo.tickerid, resolution, low, barmerge.gaps_off, barmerge.lookahead_on)
+
+// Pivot Range
+tomorrowPivot = (tomorrowHigh + tomorrowLow + tomorrowCLose) / 3
+tomorrowBC = (tomorrowHigh + tomorrowLow) / 2
+tomorrowTC = tomorrowPivot - tomorrowBC + tomorrowPivot
+
+// Tomorrow Traditional
+tR3 = tomorrowHigh + 2 * (tomorrowPivot - tomorrowLow)
+tR2 = tomorrowPivot + tomorrowHigh - tomorrowLow
+tR1 = tomorrowPivot * 2 - tomorrowLow
+tR4 = tR3 + (tR2 - tR1)
+tS1 = tomorrowPivot * 2 - tomorrowHigh
+tS2 = tomorrowPivot - (tomorrowHigh - tomorrowLow)
+tS3 = tomorrowLow - 2 * (tomorrowHigh - tomorrowPivot)
+tS4 = tS3 - (tS1 - tS2)
+
+// Tomorrow Fib Pivots
+tR1fib= tomorrowPivot + 0.382 * (tomorrowHigh - tomorrowLow)
+tS1fib= tomorrowPivot - 0.382 * (tomorrowHigh - tomorrowLow)
+tR2fib= tomorrowPivot + 0.618 * (tomorrowHigh - tomorrowLow)
+tS2fib= tomorrowPivot - 0.618 * (tomorrowHigh - tomorrowLow)
+tR3fib= tomorrowPivot + 1 * (tomorrowHigh - tomorrowLow)
+tS3fib= tomorrowPivot - 1 * (tomorrowHigh - tomorrowLow)
+tR4fib= tomorrowPivot + 1.272 * (tomorrowHigh - tomorrowLow)
+tS4fib= tomorrowPivot - 1.272 * (tomorrowHigh - tomorrowLow)
+
+// Tomorrow Camarilla
+tH3 = tomorrowCLose + (tomorrowHigh - tomorrowLow) * (1.1 / 4)
+tH4 = tomorrowCLose + (tomorrowHigh - tomorrowLow) * (1.1 / 2)
+tH5 = tomorrowHigh / tomorrowLow * tomorrowCLose
+tL3 = tomorrowCLose - (tomorrowHigh - tomorrowLow) * (1.1 / 4)
+tL4 = tomorrowCLose - (tomorrowHigh - tomorrowLow) * (1.1 / 2)
+tL5 = tomorrowCLose - (tH5 - tomorrowCLose)
+tH1 = tomorrowCLose + (tomorrowHigh - tomorrowLow) * (1.1 / 12)
+tH2 = tomorrowCLose + (tomorrowHigh - tomorrowLow) * (1.1 / 6)
+tL1 = tomorrowCLose - (tomorrowHigh - tomorrowLow) * (1.1 / 12)
+tL2 = tomorrowCLose - (tomorrowHigh - tomorrowLow) * (1.1 / 6)
+
+//Tomorrow PivotBoss
+pivotBossR1 = tomorrowHigh + (tomorrowHigh - tomorrowLow) * 0.25
+pivotBossR2 = tomorrowHigh + (tomorrowHigh - tomorrowLow) * 0.50
+pivotBossR3 = tomorrowHigh + (tomorrowHigh - tomorrowLow) * 0.75
+pivotBossR4 = tomorrowHigh + tomorrowHigh - tomorrowLow
+pivotBossS1 = tomorrowLow - (tomorrowHigh - tomorrowLow) * 0.25
+pivotBossS2 = tomorrowLow - (tomorrowHigh - tomorrowLow) * 0.50
+pivotBossS3 = tomorrowLow - (tomorrowHigh - tomorrowLow) * 0.75
+pivotBossS4 = tomorrowLow - (tomorrowHigh - tomorrowLow)
+
+if show_tomorrow_cpr_pivots and (kind == PIVOTBOSS) and passlock and show_hist_pivots_rs
+    pivboss_t_r4 = line.new(tom_start, (pivotBossR1), tom_end, (pivotBossR1), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(pivboss_t_r4[1])
+    pivboss_t_r3 = line.new(tom_start, (pivotBossR2), tom_end, (pivotBossR2), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(pivboss_t_r3[1])
+    pivboss_t_r2 = line.new(tom_start, (pivotBossR3), tom_end, (pivotBossR3), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(pivboss_t_r2[1])
+    pivboss_t_r1 = line.new(tom_start, (pivotBossR4), tom_end, (pivotBossR4), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(pivboss_t_r1[1])
+    pivboss_t_s1 = line.new(tom_start, (pivotBossS1), tom_end, (pivotBossS1), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(pivboss_t_s1[1])
+    pivboss_t_s2 = line.new(tom_start, (pivotBossS2), tom_end, (pivotBossS2), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(pivboss_t_s2[1])
+    pivboss_t_s3 = line.new(tom_start, (pivotBossS3), tom_end, (pivotBossS3), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(pivboss_t_s3[1])
+    pivboss_t_s4 = line.new(tom_start, (pivotBossS4), tom_end, (pivotBossS4), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(pivboss_t_s4[1])
+
+if show_tomorrow_cpr_pivots and (kind == PIVOTBOSS) and (show_labels or show_prices) and passlock and show_hist_pivots_rs
+    l_pivboss_t_r4 = label.new(tom_end, (pivotBossR4), text =  (show_labels ? 'R4 ' : "") + (show_prices ? "("+str.tostring(tR4fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pivboss_t_r4[1])
+    l_pivboss_t_r3 = label.new(tom_end, (pivotBossR3), text =  (show_labels ? 'R3 ' : "") + (show_prices ? "("+str.tostring(tR3fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pivboss_t_r3[1])
+    l_pivboss_t_r2 = label.new(tom_end, (pivotBossR2), text =  (show_labels ? 'R2 ' : "") + (show_prices ? "("+str.tostring(tR2fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pivboss_t_r2[1])
+    l_pivboss_t_r1 = label.new(tom_end, (pivotBossR1), text =  (show_labels ? 'R1 ' : "") + (show_prices ? "("+str.tostring(tR1fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pivboss_t_r1[1])
+    l_pivboss_t_s1 = label.new(tom_end, (pivotBossS1), text =  (show_labels ? 'S1 ' : "") + (show_prices ? "("+str.tostring(tS1fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pivboss_t_s1[1])
+    l_pivboss_t_s2 = label.new(tom_end, (pivotBossS2), text =  (show_labels ? 'S2 ' : "") + (show_prices ? "("+str.tostring(tS2fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pivboss_t_s2[1])
+    l_pivboss_t_s3 = label.new(tom_end, (pivotBossS3), text =  (show_labels ? 'S3 ' : "") + (show_prices ? "("+str.tostring(tS3fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pivboss_t_s3[1])
+    l_pivboss_t_s4 = label.new(tom_end, (pivotBossS4), text =  (show_labels ? 'S4 ' : "") + (show_prices ? "("+str.tostring(tS4fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pivboss_t_s4[1])
+
+if show_tomorrow_cpr_pivots and passlock and show_hist_pivots_pivot_only
+    _t_tc = line.new(tom_start, tomorrowTC, tom_end, tomorrowTC, xloc.bar_time, color=color.blue, width=line_width)
+    line.delete(_t_tc[1])
+    _t_p = line.new(tom_start, (tomorrowPivot), tom_end, (tomorrowPivot), xloc.bar_time, color=color.blue, width=line_width)
+    line.delete(_t_p[1])
+    _t_bc = line.new(tom_start, tomorrowBC, tom_end, tomorrowBC, xloc.bar_time, color=color.blue, width=line_width)
+    line.delete(_t_bc[1])
+
+if show_tomorrow_cpr_pivots and passlock and show_hist_pdhpdl
+    _pdh = line.new(tom_start, (tomorrowHigh), tom_end, (tomorrowHigh), xloc.bar_time, color=color.white, width=line_width)
+    line.delete(_pdh[1])
+    _pdl = line.new(tom_start, (tomorrowLow), tom_end, (tomorrowLow), xloc.bar_time, color=color.white, width=line_width)
+    line.delete(_pdl[1])    
+
+if show_tomorrow_cpr_pivots and (show_labels or show_prices) and passlock and show_hist_pivots_pivot_only
+    l_t_tc = label.new(tom_end, tomorrowTC, text =  (show_labels ? 'tTC ' : "") + (show_prices ? "("+str.tostring(tomorrowTC, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.blue, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_tc[1])
+    l_t_p = label.new(tom_end, (tomorrowPivot), text =  (show_labels ? 'P ' : "") + (show_prices ? "("+str.tostring(tomorrowPivot, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.blue, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_p[1])
+    l_t_bc = label.new(tom_end, tomorrowBC, text =  (show_labels ? 'tBC ' : "") + (show_prices ? "("+str.tostring(tomorrowBC, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.blue, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_bc[1])
+
+if show_tomorrow_cpr_pivots and (show_labels or show_prices) and passlock and show_hist_pdhpdl
+    l_pdh = label.new(tom_end, (tomorrowHigh), text =  (show_labels ? 'PDH ' : "") + (show_prices ? "("+str.tostring(tomorrowHigh, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.white, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pdh[1])
+    l_pdl = label.new(tom_end, (tomorrowLow), text =  (show_labels ? 'PDL ' : "") + (show_prices ? "("+str.tostring(tomorrowLow, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.white, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_pdl[1])
+
+if show_tomorrow_cpr_pivots and (kind == FIBONACCI) and passlock and show_hist_pivots_rs
+    _t_r4 = line.new(tom_start, (tR4fib), tom_end, (tR4fib), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_r4[1])
+    _t_r3 = line.new(tom_start, (tR3fib), tom_end, (tR3fib), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_r3[1])
+    _t_r2 = line.new(tom_start, (tR2fib), tom_end, (tR2fib), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_r2[1])
+    _t_r1 = line.new(tom_start, (tR1fib), tom_end, (tR1fib), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_r1[1])
+    _t_s1 = line.new(tom_start, (tS1fib), tom_end, (tS1fib), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_s1[1])
+    _t_s2 = line.new(tom_start, (tS2fib), tom_end, (tS2fib), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_s2[1])
+    _t_s3 = line.new(tom_start, (tS3fib), tom_end, (tS3fib), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_s3[1])
+    _t_s4 = line.new(tom_start, (tS4fib), tom_end, (tS4fib), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_s4[1])
+
+if show_tomorrow_cpr_pivots and (kind == FIBONACCI) and (show_labels or show_prices) and passlock and show_hist_pivots_rs
+    l_t_r4 = label.new(tom_end, (tR4fib), text =  (show_labels ? 'R4 ' : "") + (show_prices ? "("+str.tostring(tR4fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_r4[1])
+    l_t_r3 = label.new(tom_end, (tR3fib), text =  (show_labels ? 'R3 ' : "") + (show_prices ? "("+str.tostring(tR3fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_r3[1])
+    l_t_r2 = label.new(tom_end, (tR2fib), text =  (show_labels ? 'R2 ' : "") + (show_prices ? "("+str.tostring(tR2fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_r2[1])
+    l_t_r1 = label.new(tom_end, (tR1fib), text =  (show_labels ? 'R1 ' : "") + (show_prices ? "("+str.tostring(tR1fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_r1[1])
+    l_t_s1 = label.new(tom_end, (tS1fib), text =  (show_labels ? 'S1 ' : "") + (show_prices ? "("+str.tostring(tS1fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_s1[1])
+    l_t_s2 = label.new(tom_end, (tS2fib), text =  (show_labels ? 'S2 ' : "") + (show_prices ? "("+str.tostring(tS2fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_s2[1])
+    l_t_s3 = label.new(tom_end, (tS3fib), text =  (show_labels ? 'S3 ' : "") + (show_prices ? "("+str.tostring(tS3fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_s3[1])
+    l_t_s4 = label.new(tom_end, (tS4fib), text =  (show_labels ? 'S4 ' : "") + (show_prices ? "("+str.tostring(tS4fib, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_s4[1])
+
+if show_tomorrow_cpr_pivots and (kind == TRADITIONAL) and passlock and show_hist_pivots_rs
+    _t_r4 = line.new(tom_start, (tR4), tom_end, (tR4), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_r4[1])
+    _t_r3 = line.new(tom_start, (tR3), tom_end, (tR3), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_r3[1])
+    _t_r2 = line.new(tom_start, (tR2), tom_end, (tR2), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_r2[1])
+    _t_r1 = line.new(tom_start, (tR1), tom_end, (tR1), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_r1[1])
+    _t_s1 = line.new(tom_start, (tS1), tom_end, (tS1), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_s1[1])
+    _t_s2 = line.new(tom_start, (tS2), tom_end, (tS2), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_s2[1])
+    _t_s3 = line.new(tom_start, (tS3), tom_end, (tS3), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_s3[1])
+    _t_s4 = line.new(tom_start, (tS4), tom_end, (tS4), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_s4[1])
+
+if show_tomorrow_cpr_pivots and (kind == TRADITIONAL) and (show_labels or show_prices) and passlock and show_hist_pivots_rs
+    l_t_r4 = label.new(tom_end, (tR4), text =  (show_labels ? 'R4 ' : "") + (show_prices ? "("+str.tostring(tR4, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_r4[1])
+    l_t_r3 = label.new(tom_end, (tR3), text =  (show_labels ? 'R3 ' : "") + (show_prices ? "("+str.tostring(tR3, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_r3[1])
+    l_t_r2 = label.new(tom_end, (tR2), text =  (show_labels ? 'R2 ' : "") + (show_prices ? "("+str.tostring(tR2, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_r2[1])
+    l_t_r1 = label.new(tom_end, (tR1), text =  (show_labels ? 'R1 ' : "") + (show_prices ? "("+str.tostring(tR1, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_r1[1])
+    l_t_s1 = label.new(tom_end, (tS1), text =  (show_labels ? 'S1 ' : "") + (show_prices ? "("+str.tostring(tS1, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_s1[1])
+    l_t_s2 = label.new(tom_end, (tS2), text =  (show_labels ? 'S2 ' : "") + (show_prices ? "("+str.tostring(tS2, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_s2[1])
+    l_t_s3 = label.new(tom_end, (tS3), text =  (show_labels ? 'S3 ' : "") + (show_prices ? "("+str.tostring(tS3, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_s3[1])
+    l_t_s4 = label.new(tom_end, (tS4), text =  (show_labels ? 'S4 ' : "") + (show_prices ? "("+str.tostring(tS4, format.mintick)+")" : ""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_s4[1])
+
+if show_tomorrow_cpr_pivots and (kind == CAMARILLA) and passlock and show_hist_pivots_rs
+    _t_h4 = line.new(tom_start, (tH4), tom_end, (tH4), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_h4[1])
+    _t_h5 = line.new(tom_start, (tH5), tom_end, (tH5), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_h5[1])
+    _t_h3 = line.new(tom_start, (tH3), tom_end, (tH3), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_h3[1])
+    _t_h2 = line.new(tom_start, (tH2), tom_end, (tH2), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_h2[1])
+    _t_h1 = line.new(tom_start, (tH1), tom_end, (tH1), xloc.bar_time, color=color.red, width=line_width)
+    line.delete(_t_h1[1])
+    _t_l1 = line.new(tom_start, (tL1), tom_end, (tL1), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_l1[1])
+    _t_l2 = line.new(tom_start, (tL2), tom_end, (tL2), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_l2[1])
+    _t_l3 = line.new(tom_start, (tL3), tom_end, (tL3), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_l3[1])
+    _t_l4 = line.new(tom_start, (tL4), tom_end, (tL4), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_l4[1])
+    _t_l5 = line.new(tom_start, (tL5), tom_end, (tL5), xloc.bar_time, color=color.lime, width=line_width)
+    line.delete(_t_l5[1])
+
+if show_tomorrow_cpr_pivots and (kind == CAMARILLA) and (show_labels or show_prices) and passlock and show_hist_pivots_rs
+    l_t_h4 = label.new(tom_end, (tH4), text =  (show_labels ? 'H4 - Bullish Breakout' : "") + (show_prices ? "("+str.tostring(tH4, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_h4[1])
+    l_t_h3 = label.new(tom_end, (tH3), text =  (show_labels ? 'H3 - Sell Reversal' : "") + (show_prices ? "("+str.tostring(tH3, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_h3[1])
+    l_t_h2 = label.new(tom_end, (tH2), text =  (show_labels ? 'H2 ' : "") + (show_prices ? "("+str.tostring(tH2, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_h2[1])
+    l_t_h1 = label.new(tom_end, (tH1), text =  (show_labels ? 'H1 ' : "") + (show_prices ? "("+str.tostring(tH1, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_h1[1])
+    l_t_h5 = label.new(tom_end, (tH5), text =  (show_labels ? 'H5 - Breakout Target' : "") + (show_prices ? "("+str.tostring(tH5, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.red, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_h5[1])
+    l_t_l4 = label.new(tom_end, (tL4), text =  (show_labels ? 'L4 - Bearish Breakout ' : "") + (show_prices ? "("+str.tostring(tL4, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_l4[1])
+    l_t_l3 = label.new(tom_end, (tL3), text =  (show_labels ? 'L3 - Buy Reversal' : "") + (show_prices ? "("+str.tostring(tL3, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_l3[1])
+    l_t_l2 = label.new(tom_end, (tL2), text =  (show_labels ? 'L2 ' : "") + (show_prices ? "("+str.tostring(tL2, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_l2[1])
+    l_t_l1 = label.new(tom_end, (tL1), text =  (show_labels ? 'L1 ' : "") + (show_prices ? "("+str.tostring(tL1, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_l1[1])
+    l_t_l5 = label.new(tom_end, (tL5), text =  (show_labels ? 'L5 - Breakout Target' : "") + (show_prices ? "("+str.tostring(tL5, format.mintick)+")":""), xloc=xloc.bar_time, textcolor=color.lime, color=color.new(color.black, 100), style=label.style_label_left)
+    label.delete(l_t_l5[1])
+
+//----------------------------------------------------------------------------------------------------
+// ALL IN ONE CPR
+//----------------------------------------------------------------------------------------------------
+//Central Pivot Range - COnt'd from Line 387
+
+showcross = input(false, 'Show Buy/Sell signal from Bollinger/Hull CO', group="Bollinger/Hull Crossover")
+
+// Pivot Range
+tP = (th_d + tl_d + tc_d) / 3
+tTC = (th_d + tl_d) / 2
+tBC = tP - tTC + tP
+
+tP_w = (th_d_w + tl_d_w + tc_d_w) / 3
+tTC_w = (th_d_w + tl_d_w) / 2
+tBC_w = tP_w - tTC_w + tP_w
+
+weeklyCampivot_range = th_d_w - tl_d_w
+weeklyCamr1 = tc_d_w + weeklyCampivot_range * 1.1 / 12.0
+weeklyCams1 = tc_d_w - weeklyCampivot_range * 1.1 / 12.0
+weeklyCamr2 = tc_d_w + weeklyCampivot_range * 1.1 / 6.0
+weeklyCams2 = tc_d_w - weeklyCampivot_range * 1.1 / 6.0
+weeklyCamr3 = tc_d_w + weeklyCampivot_range * 1.1 / 4.0
+weeklyCams3 = tc_d_w - weeklyCampivot_range * 1.1 / 4.0
+weeklyCamr4 = tc_d_w + weeklyCampivot_range * 1.1 / 2.0
+weeklyCams4 = tc_d_w - weeklyCampivot_range * 1.1 / 2.0
+weeklyCamr5 = th_d_w / tl_d_w * tc_d_w
+weeklyCams5 = 2 * tc_d_w - weeklyCamr5
+
+weeklyCamR3Line = showWeeklyCam and passlock ? line.new(oTime, weeklyCamr3, cTime, weeklyCamr3, xloc=xloc.bar_time, color=color.orange,extend=extend.both) : na
+weeklyCamR4Line = showWeeklyCam and passlock ? line.new(oTime, weeklyCamr4, cTime, weeklyCamr4, xloc=xloc.bar_time, color=color.orange,extend=extend.both) : na
+weeklyCamR5Line = showWeeklyCam and passlock ? line.new(oTime, weeklyCamr5, cTime, weeklyCamr5, xloc=xloc.bar_time, color=color.orange,extend=extend.both) : na
+weeklypdh = showWeeklyCam and passlock ? line.new(oTime, th_d_w, cTime, th_d_w, xloc=xloc.bar_time, color=color.orange,extend=extend.both) : na
+
+weeklyCamS3Line = showWeeklyCam and passlock ? line.new(oTime, weeklyCams3, cTime, weeklyCams3, xloc=xloc.bar_time, color=color.aqua,extend=extend.both) : na
+weeklyCamS4Line = showWeeklyCam and passlock ? line.new(oTime, weeklyCams4, cTime, weeklyCams4, xloc=xloc.bar_time, color=color.aqua,extend=extend.both) : na
+weeklyCamS5Line = showWeeklyCam and passlock ? line.new(oTime, weeklyCams5, cTime, weeklyCams5, xloc=xloc.bar_time, color=color.aqua,extend=extend.both) : na
+weeklypdl = showWeeklyCam and passlock ? line.new(oTime, tl_d_w, cTime, tl_d_w, xloc=xloc.bar_time, color=color.aqua,extend=extend.both) : na
+
+weekly_tP_w = show_CPR_tomorrow and passlock ? line.new(oTime, tP_w, cTime, tP_w, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+weekly_tTC_w = show_CPR_tomorrow and passlock ? line.new(oTime, tTC_w, cTime, tTC_w, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+weekly_tBC_w = show_CPR_tomorrow and passlock ? line.new(oTime, tBC_w, cTime, tBC_w, xloc=xloc.bar_time, color=color.lime,extend=extend.right) : na
+
+monthly_tP_w = show_cpr_monthly and passlock ? line.new(oTime, tP, cTime, tP, xloc=xloc.bar_time, color=color.white,extend=extend.right) : na
+monthly_tTC_w = show_cpr_monthly and passlock ? line.new(oTime, tTC, cTime, tTC, xloc=xloc.bar_time, color=color.white,extend=extend.right) : na
+monthly_tBC_w = show_cpr_monthly and passlock ? line.new(oTime, tBC, cTime, tBC, xloc=xloc.bar_time, color=color.white,extend=extend.right) : na
+
+//weeklyCamOffset
+
+if(show_CPR_tomorrow and passlock)
+    draw_label_vpr(bar_index[0] + cprLabelOffset, tP_w, "W-PP = " + str.tostring(tP_w, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "W-PP = " + str.tostring(tP_w, '0.00'))
+    draw_label_vpr(bar_index[0] + cprLabelOffset, tTC_w, "W-TPP = " + str.tostring(tTC_w, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "W-TPP = " + str.tostring(tTC_w, '0.00'))
+    draw_label_vpr(bar_index[0] + cprLabelOffset, tBC_w, "W-BPP = " + str.tostring(tBC_w, '0.00'), xloc.bar_index, yloc.price, color.new(color.lime, 0), label.style_none, color.new(color.lime, 0), size.normal, text.align_left, "W-BPP = " + str.tostring(tBC_w, '0.00'))
+
+if(show_cpr_monthly and passlock)
+    draw_label_vpr(bar_index[0] + cprLabelOffset, tP, "M-PP = " + str.tostring(tP, '0.00'), xloc.bar_index, yloc.price, color.new(color.white, 0), label.style_none, color.new(color.white, 0), size.normal, text.align_left, "M-PP = " + str.tostring(tP, '0.00'))
+    draw_label_vpr(bar_index[0] + cprLabelOffset, tTC, "M-TPP = " + str.tostring(tTC, '0.00'), xloc.bar_index, yloc.price, color.new(color.white, 0), label.style_none, color.new(color.white, 0), size.normal, text.align_left, "M-TPP = " + str.tostring(tTC, '0.00'))
+    draw_label_vpr(bar_index[0] + cprLabelOffset, tBC, "M-BPP = " + str.tostring(tBC, '0.00'), xloc.bar_index, yloc.price, color.new(color.white, 0), label.style_none, color.new(color.white, 0), size.normal, text.align_left, "M-BPP = " + str.tostring(tBC, '0.00'))
+
+if(showWeeklyCam and passlock)
+    draw_label_vpr(bar_index[0] + weeklyCamOffset, weeklyCamr3, "SELL REVERSAL = " + str.tostring(weeklyCamr3, '0.00'), xloc.bar_index, yloc.price, color.new(color.orange, 0), label.style_none, color.new(color.orange, 0), size.normal, text.align_left, "SELL REVERSAL = " + str.tostring(weeklyCamr3, '0.00'))
+    draw_label_vpr(bar_index[0] + weeklyCamOffset, weeklyCamr4, "BULLISH BO = " + str.tostring(weeklyCamr4, '0.00'), xloc.bar_index, yloc.price, color.new(color.orange, 0), label.style_none, color.new(color.orange, 0), size.normal, text.align_left, "BULLISH BO = " + str.tostring(weeklyCamr4, '0.00'))
+    draw_label_vpr(bar_index[0] + weeklyCamOffset, weeklyCamr5, "BO TARGET = " + str.tostring(weeklyCamr5, '0.00'), xloc.bar_index, yloc.price, color.new(color.orange, 0), label.style_none, color.new(color.orange, 0), size.normal, text.align_left, "BO TARGET = " + str.tostring(weeklyCamr5, '0.00'))
+    draw_label_vpr(bar_index[0] + weeklyCamOffset, th_d_w, "PWH = " + str.tostring(th_d_w, '0.00'), xloc.bar_index, yloc.price, color.new(color.orange, 0), label.style_none, color.new(color.orange, 0), size.normal, text.align_left, "PWH = " + str.tostring(th_d_w, '0.00'))
+
+    draw_label_vpr(bar_index[0] + weeklyCamOffset, weeklyCams3, "BUY REVERSAL = " + str.tostring(weeklyCams3, '0.00'), xloc.bar_index, yloc.price, color.new(color.aqua, 0), label.style_none, color.new(color.aqua, 0), size.normal, text.align_left, "BUY REVERSAL = " + str.tostring(weeklyCams3, '0.00'))
+    draw_label_vpr(bar_index[0] + weeklyCamOffset, weeklyCams4, "BEARISH BO = " + str.tostring(weeklyCams4, '0.00'), xloc.bar_index, yloc.price, color.new(color.aqua, 0), label.style_none, color.new(color.aqua, 0), size.normal, text.align_left, "BEARISH BO = " + str.tostring(weeklyCams4, '0.00'))
+    draw_label_vpr(bar_index[0] + weeklyCamOffset, weeklyCams5, "BO TARGET = " + str.tostring(weeklyCams5, '0.00'), xloc.bar_index, yloc.price, color.new(color.aqua, 0), label.style_none, color.new(color.aqua, 0), size.normal, text.align_left, "BO TARGET = " + str.tostring(weeklyCams5, '0.00'))
+    draw_label_vpr(bar_index[0] + weeklyCamOffset, tl_d_w, "PWL = " + str.tostring(tl_d_w, '0.00'), xloc.bar_index, yloc.price, color.new(color.aqua, 0), label.style_none, color.new(color.aqua, 0), size.normal, text.align_left, "PWL = " + str.tostring(tl_d_w, '0.00'))
+
+//----------------------------------------------------------------------------------------------------
+//MARKET STRUCTURE
+//Description: Enhanced Zig Zag indicator that plot points on the chart whenever prices reverse by a percentage greater than a pre-chosen variable.
+
+// Hull trend
+
+plotHUL = input(title='Plot HULL Trend?', defval=false, group="Hull Trend")
+tf = input.timeframe('10', title='Timeframe for HMA', options=['1', '5', '10', '15', '30', '60', '120', '240', '360', '720', 'D', 'W', 'Y'], group="Hull Trend")
+hullsrc = input(hl2, group="Hull Trend")
+length = input(24, title='Period', group="Hull Trend")
+shift = input(0, title='Offset', group="Hull Trend")
+
+hma3(_src, _length) =>
+    p = length / 2
+    ta.wma(ta.wma(close, p / 3) * 3 - ta.wma(close, p / 2) - ta.wma(close, p), p)
+
+aa = request.security(syminfo.tickerid, tf, ta.hma(hullsrc, length)[shift])
+bb = request.security(syminfo.tickerid, tf, hma3(hullsrc, length)[shift])
+cc = bb > aa ? color.lime : color.red
+p1 = plot(passlock and plotHUL ? aa : na, color=cc, linewidth=1, transp=75)
+p2 = plot(passlock and plotHUL ? bb : na, color=cc, linewidth=1, transp=75)
+fill(p1, p2, color=cc, transp=25)
+crossdn = aa > bb and aa[1] < bb[1]
+crossup = bb > aa and bb[1] < aa[1]
+plotshape(showcross and crossdn and passlock ? aa : na, location=location.absolute, style=shape.labeldown, color=color.new(color.red, 0), size=size.tiny, text='Sell', textcolor=color.new(color.white, 0), offset=0)
+plotshape(showcross and crossup and passlock ? aa : na, location=location.absolute, style=shape.labelup, color=color.new(color.green, 0), size=size.tiny, text='Buy', textcolor=color.new(color.white, 0), offset=0)
+alertcondition(showcross and crossdn and passlock ? aa : na, title='hma long', message='hma: long ')
+alertcondition(showcross and crossup and passlock ? aa : na, title='hma short', message='hma: short ')
+//----------------------------------------------------------------------------------------------------
+// Bollinger Bands
+plotBoll = input(title='Plot Bollinger Bands?', defval=false, group="Bollinger Bands")
+len = input(20, group="Bollinger Bands")
+// Draw channel.
+channelType = input.string(defval='Bollinger', title='Channel Type', options=['NONE', 'Donchian', 'Bollinger', 'Envelope'], group="Bollinger Bands")
+channelLen = input.int(14, minval=1, title='Channel Length', group="Bollinger Bands")
+envPer = input.float(4, title='Envelope %', minval=0, group="Bollinger Bands") / 100
+
+getChannels(hullsrc, len) =>
+    if channelType == 'Bollinger'
+        ma = ta.ema(hullsrc, len)
+        dev = ta.stdev(hullsrc, len)
+        bbUp = ma + 2 * dev
+        bbDown = ma - 2 * dev
+        [bbUp, bbDown]
+    else
+        if channelType == 'Donchian'
+            donUp = ta.highest(high[1], len)
+            donDown = ta.lowest(low[1], len)
+            [donUp, donDown]
+        else
+            if channelType == 'Envelope'
+                ma = ta.ema(hullsrc, len)
+                envUp = ma * (1 + envPer)
+                envDown = ma * (1 - envPer)
+                [envUp, envDown]
+            else
+                [na, na]
+
+[upperchannel, lowerchannel] = getChannels(hullsrc, len)
+u = plot(passlock and plotBoll ? upperchannel : na, linewidth=1, color=color.new(color.black, 0), title='Band High')
+plot(passlock and plotBoll ? math.avg(upperchannel, lowerchannel) : na, linewidth=1, color=color.new(color.red, 0), title='Band Middle')
+l = plot(passlock and plotBoll ? lowerchannel : na, linewidth=1, color=color.new(color.black, 0), title='Band Low')
+fill(u, l, transp=90)
+//----------------------------------------------------------------------------------------------------
+// Coloured volume candles - VMA = Volume Moving Average
+// Decipher : x > 1.5 VMA - Massive BUY/SELL | 0.5VMA =< x < 1.5VMA - Normal | x < 0.5VMA - Interest Drop
+
+showVolCol = input(false, 'Enable Dynamic Volume Based Candle Color?', group="Volume Based Bar Color", tooltip='x > 1.5 VMA - Massive BUY/SELL | 0.5VMA =< x < 1.5VMA - Normal | x < 0.5VMA - Interest Drop')
+lengthbar = input.int(13, 'Volume Candle Length', minval=1, group="Volume Based Bar Color")
+volumeAverage = input.string("SMA" ,"Volume Moving Average", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA", "HMA", "EHMA"],group="Volume Based Bar Color")
+
+colu1  = input(color.lime, "High Volume Color  ", inline="High",group="Volume Based Bar Color")
+cold1  = input(color.maroon, "", inline="High",group="Volume Based Bar Color")
+
+colu2  = input(color.green, "Normal Volume Color", inline="Normal",group="Volume Based Bar Color")
+cold2  = input(color.red, "", inline="Normal",group="Volume Based Bar Color")
+
+colu3  = input(color.gray, "Low Volume Color   ", inline="Low",group="Volume Based Bar Color")
+cold3  = input(color.gray, "", inline="Low",group="Volume Based Bar Color")
+
+avrg = ma(volume, lengthbar, volumeAverage)
+
+vold1 = volume > avrg * 1.5 and close < open
+vold2 = volume >= avrg * 0.5 and volume <= avrg * 1.5 and close < open
+vold3 = volume < avrg * 0.5 and close < open
+
+volu1 = volume > avrg * 1.5 and close > open
+volu2 = volume >= avrg * 0.5 and volume <= avrg * 1.5 and close > open
+volu3 = volume < avrg * 0.5 and close > open
+
+color = vold1 and showVolCol ? cold1 : vold2 and showVolCol ? cold2 : vold3 and showVolCol ? cold3 : volu1 and showVolCol ? colu1 : volu2 and showVolCol ? colu2 : volu3 and showVolCol ? colu3 : na
+
+barcolor(color)
+
+
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+open_plus_10_top = jb_day_open+10
+open_plus_10_bottom = jb_day_open-10
+
+var box1 = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+box.set_lefttop(box1, oTime, open_plus_10_top)
+box.set_rightbottom(box1, cTime, open_plus_10_bottom)
+box.set_bgcolor(box1, color.new(color.red,80))
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+// jb_day_open_plus_100 = jb_day_open+100
+// jb_day_open_plus_100_top = jb_day_open_plus_100+10
+// jb_day_open_plus_100_bottom = jb_day_open_plus_100-10
+
+// var plus_100_box = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+// box.set_lefttop(plus_100_box, oTime, jb_day_open_plus_100_top)
+// box.set_rightbottom(plus_100_box, cTime, jb_day_open_plus_100_bottom)
+// box.set_bgcolor(plus_100_box, color.new(color.red,80))
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+jb_day_open_plus_200 = jb_day_open+200
+jb_day_open_plus_200_top = jb_day_open_plus_200+10
+jb_day_open_plus_200_bottom = jb_day_open_plus_200-10
+
+var plus_200_box = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+box.set_lefttop(plus_200_box, oTime, jb_day_open_plus_200_top)
+box.set_rightbottom(plus_200_box, cTime, jb_day_open_plus_200_bottom)
+box.set_bgcolor(plus_200_box, color.new(color.red,80))
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+jb_day_open_plus_300 = jb_day_open+300
+jb_day_open_plus_300_top = jb_day_open_plus_300+10
+jb_day_open_plus_300_bottom = jb_day_open_plus_300-10
+
+var plus_300_box = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+box.set_lefttop(plus_300_box, oTime, jb_day_open_plus_300_top)
+box.set_rightbottom(plus_300_box, cTime, jb_day_open_plus_300_bottom)
+box.set_bgcolor(plus_300_box, color.new(color.red,80))
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+jb_day_open_plus_400 = jb_day_open+400
+jb_day_open_plus_400_top = jb_day_open_plus_400+10
+jb_day_open_plus_400_bottom = jb_day_open_plus_400-10
+
+var plus_400_box = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+box.set_lefttop(plus_400_box, oTime, jb_day_open_plus_400_top)
+box.set_rightbottom(plus_400_box, cTime, jb_day_open_plus_400_bottom)
+box.set_bgcolor(plus_400_box, color.new(color.red,80))
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+// jb_day_open_minus_100 = jb_day_open-100
+// jb_day_open_minus_100_top = jb_day_open_minus_100+10
+// jb_day_open_minus_100_bottom = jb_day_open_minus_100-10
+
+// var minus_100_box = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+// box.set_lefttop(minus_100_box, oTime, jb_day_open_minus_100_top)
+// box.set_rightbottom(minus_100_box, cTime, jb_day_open_minus_100_bottom)
+// box.set_bgcolor(minus_100_box, color.new(color.green,80))
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+jb_day_open_minus_200 = jb_day_open-200
+jb_day_open_minus_200_top = jb_day_open_minus_200+10
+jb_day_open_minus_200_bottom = jb_day_open_minus_200-10
+
+var minus_200_box = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+box.set_lefttop(minus_200_box, oTime, jb_day_open_minus_200_top)
+box.set_rightbottom(minus_200_box, cTime, jb_day_open_minus_200_bottom)
+box.set_bgcolor(minus_200_box, color.new(color.green,80))
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+jb_day_open_minus_300 = jb_day_open-300
+jb_day_open_minus_300_top = jb_day_open_minus_300+10
+jb_day_open_minus_300_bottom = jb_day_open_minus_300-10
+
+var minus_300_box = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+box.set_lefttop(minus_300_box, oTime, jb_day_open_minus_300_top)
+box.set_rightbottom(minus_300_box, cTime, jb_day_open_minus_300_bottom)
+box.set_bgcolor(minus_300_box, color.new(color.green,80))
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+jb_day_open_minus_400 = jb_day_open-400
+jb_day_open_minus_400_top = jb_day_open_minus_400+10
+jb_day_open_minus_400_bottom = jb_day_open_minus_400-10
+
+var minus_400_box = passlock and show_JB ? box.new(oTime, open, cTime, close, xloc=xloc.bar_time, border_style=line.style_dashed) : na
+box.set_lefttop(minus_400_box, oTime, jb_day_open_minus_400_top)
+box.set_rightbottom(minus_400_box, cTime, jb_day_open_minus_400_bottom)
+box.set_bgcolor(minus_400_box, color.new(color.green,80))
